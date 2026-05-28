@@ -14,7 +14,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "DoubaoVoiceWeTypeAgent",
-            path: "Sources/DoubaoVoiceWeTypeAgent"
+            path: "Sources/DoubaoVoiceWeTypeAgent",
+            resources: [
+                .copy("Resources")
+            ]
         ),
         .executableTarget(
             name: "IMSwitch",

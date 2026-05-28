@@ -18,3 +18,9 @@ Run:
 swift build -c release
 plutil -lint launchd/com.github.Coco422.doubao-voice-wetype-agent.plist.template
 ```
+
+When touching packaging or installer scripts, also run:
+
+```bash
+bash -n scripts/install.sh scripts/install_or_update_app.sh scripts/package_dmg.sh scripts/uninstall.sh
+```

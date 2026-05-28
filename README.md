@@ -38,6 +38,8 @@ The app has no Dock icon. It lives in the macOS menu bar:
 
 The menu shows current permissions, current input method, event tap state, restart count, and the latest event. It can also open the relevant macOS privacy settings.
 
+Use `Restart agent` to let launchd restart the agent. Use `Quit agent` to unload the LaunchAgent and stop the menu bar process.
+
 ## Requirements
 
 - macOS 13 or newer
@@ -61,6 +63,8 @@ swift run im-switch --current
 
 ## Install
 
+### From Source
+
 ```bash
 git clone https://github.com/Coco422/doubao-voice-wetype-agent.git
 cd doubao-voice-wetype-agent
@@ -80,12 +84,49 @@ and installs a LaunchAgent:
 ~/Library/LaunchAgents/com.github.Coco422.doubao-voice-wetype-agent.plist
 ```
 
+### From DMG
+
+Build a local DMG:
+
+```bash
+./scripts/package_dmg.sh
+```
+
+This creates:
+
+```text
+dist/Doubao Voice WeType Agent.app
+dist/DoubaoVoiceWeTypeAgent-<version>.dmg
+```
+
+Open the DMG and double-click:
+
+```text
+1 Double-click to Install or Update.command
+```
+
+It installs or updates the app at:
+
+```text
+~/Applications/Doubao Voice WeType Agent.app
+```
+
+and points the LaunchAgent at the app executable.
+
+If you double-click `Doubao Voice WeType Agent.app` directly, it will install itself to `~/Applications`, register the LaunchAgent, then run from the installed location.
+
 ## Permissions
 
 Grant both permissions to:
 
 ```text
 ~/.local/bin/doubao-voice-wetype-agent
+```
+
+If you installed from the DMG, grant permissions to:
+
+```text
+~/Applications/Doubao Voice WeType Agent.app/Contents/MacOS/doubao-voice-wetype-agent
 ```
 
 Required:
@@ -99,6 +140,23 @@ After granting permissions, either use the menu bar item to retry or run:
 launchctl kickstart -k gui/$(id -u)/com.github.Coco422.doubao-voice-wetype-agent
 ```
 
+The first launch may show `豆 !` in the menu bar. That is expected until both permissions are granted. After granting permissions, choose `Retry permissions/tap`; it should change to `豆 OK`.
+
+## Updates And Permission Stability
+
+macOS privacy permissions are tied to the app's identity. To reduce re-authorization:
+
+- Keep the installed app path stable.
+- Keep the LaunchAgent label stable.
+- Sign every release with the same Developer ID identity when distributing builds.
+- Update in place with `1 Double-click to Install or Update.command` instead of changing install locations.
+
+Unsigned or ad-hoc signed builds may still require re-authorization after the binary changes, because macOS can treat the new build as a different executable. For local testing this is normal; for smooth updates, build the DMG with a stable signing identity:
+
+```bash
+CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/package_dmg.sh
+```
+
 ## Configure Another IME Pair
 
 The LaunchAgent template uses environment variables:
@@ -110,6 +168,30 @@ VOICE_IME_ALIASES=com.bytedance.inputmethod.doubaoime
 ```
 
 Edit the installed plist or template if you want to use a different restore IME or voice IME.
+
+## Tune Voice Startup Timing
+
+The agent keeps a persistent config file at:
+
+```text
+~/Library/Application Support/DoubaoVoiceWeTypeAgent/config.json
+```
+
+The default voice settle delay is `500` ms:
+
+```json
+{
+  "voiceSettleDelayMs": 500
+}
+```
+
+This is the extra wait after macOS reports Doubao as the active input source and before the agent posts synthetic `Command + Option` down. If Doubao switches in but the voice UI does not start, try increasing it, for example `700` or `900`. The value is clamped to `0...5000` ms and is read each time a managed hold starts, so edits apply on the next shortcut attempt.
+
+You can also override it from LaunchAgent with:
+
+```text
+VOICE_SETTLE_DELAY_MS=700
+```
 
 ## Diagnostics
 
@@ -138,6 +220,14 @@ launchctl print gui/$(id -u)/com.github.Coco422.doubao-voice-wetype-agent
 ```
 
 The uninstall script unloads and removes the LaunchAgent. It intentionally leaves installed binaries in `~/.local/bin` so macOS privacy permissions are not churned unless you delete them yourself.
+
+If you installed from the DMG, remove the installed app only when you really want to reset that install path:
+
+```bash
+rm -rf "$HOME/Applications/Doubao Voice WeType Agent.app"
+```
+
+Keeping the app in place is better for update stability.
 
 ## Caveats
 

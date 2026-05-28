@@ -7,11 +7,13 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>__HOME__/.local/bin/doubao-voice-wetype-agent</string>
+    <string>__PROGRAM__</string>
   </array>
 
   <key>EnvironmentVariables</key>
   <dict>
+    <key>AGENT_LAUNCHD_LABEL</key>
+    <string>__LABEL__</string>
     <key>RESTORE_IME_ID</key>
     <string>com.tencent.inputmethod.wetype.pinyin</string>
     <key>VOICE_IME_ID</key>

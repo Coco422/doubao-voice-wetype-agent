@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import Quartz
 
@@ -11,12 +12,17 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusMenuItem = NSMenuItem()
     private let permissionsMenuItem = NSMenuItem()
     private let inputMenuItem = NSMenuItem()
+    private let timingMenuItem = NSMenuItem()
     private let lastEventMenuItem = NSMenuItem()
     private let tapMenuItem = NSMenuItem()
     private var statusTimer: Timer?
     private var retryTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if InstallCoordinator.prepareInstalledLaunchIfNeeded() {
+            return
+        }
+
         NSApp.setActivationPolicy(.accessory)
         setupMenuBar()
         refreshPermissions(requestPrompt: false)
@@ -46,7 +52,7 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func addReadOnlyMenuItems() {
-        [statusMenuItem, permissionsMenuItem, inputMenuItem, tapMenuItem, lastEventMenuItem].forEach {
+        [statusMenuItem, permissionsMenuItem, inputMenuItem, timingMenuItem, tapMenuItem, lastEventMenuItem].forEach {
             $0.isEnabled = false
             menu.addItem($0)
         }
@@ -59,8 +65,10 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem(title: "Open Input Monitoring settings", action: #selector(openInputMonitoringSettings), keyEquivalent: "i"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Restore input method", action: #selector(restoreInputNow), keyEquivalent: "w"))
+        menu.addItem(NSMenuItem(title: "Open config", action: #selector(openConfig), keyEquivalent: "c"))
         menu.addItem(NSMenuItem(title: "Open log", action: #selector(openLog), keyEquivalent: "l"))
         menu.addItem(NSMenuItem(title: "Restart agent", action: #selector(restartAgent), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit agent", action: #selector(quitAgent), keyEquivalent: "x"))
     }
 
     private func startTimers() {
@@ -205,6 +213,7 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenuItem.title = "Status: \(snapshot.mode.rawValue)"
         permissionsMenuItem.title = "Permissions: AX \(snapshot.accessibilityOK ? "OK" : "missing") / Input \(snapshot.inputMonitoringOK ? "OK" : "missing")"
         inputMenuItem.title = "Current input: \(displayInputName(snapshot.currentInputID))"
+        timingMenuItem.title = "Voice settle delay: \(config.voiceSettleDelayMs) ms"
         tapMenuItem.title = "Tap: \(snapshot.eventTapReady ? "enabled" : "disabled") / restarts \(snapshot.tapRestartCount)"
         lastEventMenuItem.title = "Last: \(snapshot.lastEvent)"
         writeStatusFile(snapshot)
@@ -278,8 +287,31 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(url)
     }
 
+    @objc private func openConfig() {
+        ensureDefaultConfigFile(path: config.configPath, voiceSettleDelayMs: config.defaultVoiceSettleDelayMs)
+        NSWorkspace.shared.open(URL(fileURLWithPath: config.configPath))
+    }
+
     @objc private func restartAgent() {
         log("agent restart requested from menu")
         exit(0)
+    }
+
+    @objc private func quitAgent() {
+        log("agent quit requested from menu")
+        bootoutLaunchAgent()
+        NSApp.terminate(nil)
+    }
+
+    private func bootoutLaunchAgent() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["bootout", "gui/\(getuid())/\(config.launchdLabel)"]
+
+        do {
+            try process.run()
+        } catch {
+            log("failed to bootout launch agent \(config.launchdLabel): \(error)")
+        }
     }
 }

@@ -16,6 +16,9 @@ LaunchAgent
       -> synthetic modifier events
 ```
 
+DMG distribution installs the app bundle to `~/Applications/Doubao Voice WeType Agent.app`.
+The installer command and the app's first-launch self-install path both write the same LaunchAgent label and executable path, so future updates can replace the app in place.
+
 ## State Machine
 
 ```text
@@ -65,15 +68,27 @@ If macOS disables the event tap because of timeout or user input, the app marks 
 
 ## Configuration
 
-Configuration is read from environment variables, usually supplied by LaunchAgent:
+IME and path configuration is read from environment variables, usually supplied by LaunchAgent:
 
 | Variable | Default |
 | --- | --- |
+| `AGENT_LAUNCHD_LABEL` | `com.github.Coco422.doubao-voice-wetype-agent` |
 | `RESTORE_IME_ID` | `com.tencent.inputmethod.wetype.pinyin` |
 | `VOICE_IME_ID` | `com.bytedance.inputmethod.doubaoime.pinyin` |
 | `VOICE_IME_ALIASES` | `com.bytedance.inputmethod.doubaoime` |
+| `DOUBAO_AGENT_CONFIG_PATH` | `~/Library/Application Support/DoubaoVoiceWeTypeAgent/config.json` |
 | `DOUBAO_AGENT_LOG_PATH` | `~/Library/Logs/doubao-voice-wetype-agent.log` |
 | `DOUBAO_AGENT_STATUS_PATH` | `~/Library/Application Support/DoubaoVoiceWeTypeAgent/status.json` |
+
+Timing configuration is persisted in `config.json`:
+
+```json
+{
+  "voiceSettleDelayMs": 500
+}
+```
+
+`voiceSettleDelayMs` is the wait after macOS confirms the voice IME is selected and before the synthetic `Command + Option` down is posted. It is clamped to `0...5000` ms and can be overridden with `VOICE_SETTLE_DELAY_MS`.
 
 ## Files
 
@@ -81,9 +96,13 @@ Configuration is read from environment variables, usually supplied by LaunchAgen
 Sources/DoubaoVoiceWeTypeAgent/Core.swift
 Sources/DoubaoVoiceWeTypeAgent/App.swift
 Sources/DoubaoVoiceWeTypeAgent/Events.swift
+Sources/DoubaoVoiceWeTypeAgent/Installer.swift
 Sources/DoubaoVoiceWeTypeAgent/main.swift
+Sources/DoubaoVoiceWeTypeAgent/Resources/AppIcon.icns
 Sources/IMSwitch/main.swift
 launchd/com.github.Coco422.doubao-voice-wetype-agent.plist.template
 scripts/install.sh
+scripts/install_or_update_app.sh
+scripts/package_dmg.sh
 scripts/uninstall.sh
 ```

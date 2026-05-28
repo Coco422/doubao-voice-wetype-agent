@@ -104,7 +104,9 @@ extension AgentApp {
     }
 
     private func beginManagedHold() {
-        guard selectAndSettleInput(config.voiceInputID, settleMs: 260) else {
+        let settleMs = config.voiceSettleDelayMs
+        log("switching to voice input; voiceSettleDelayMs=\(settleMs)")
+        guard selectAndSettleInput(config.voiceInputID, settleMs: settleMs) else {
             markManagedHoldFailure(event: "failed to switch voice input", error: "cannot switch to voice input")
             log("failed to switch/settle voice input; abort managing hold")
             return

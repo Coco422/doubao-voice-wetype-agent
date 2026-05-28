@@ -4,26 +4,49 @@ import Foundation
 import Quartz
 
 struct AgentConfig {
+    let launchdLabel: String
     let restoreInputID: String
     let voiceInputID: String
     let voiceInputAliases: Set<String>
+    let configPath: String
     let logPath: String
     let statusPath: String
+    let defaultVoiceSettleDelayMs: UInt32
+
+    var voiceSettleDelayMs: UInt32 {
+        configuredUInt32(
+            configPath: configPath,
+            fileKey: "voiceSettleDelayMs",
+            envKey: "VOICE_SETTLE_DELAY_MS",
+            defaultValue: defaultVoiceSettleDelayMs,
+            range: 0...5_000
+        )
+    }
 
     static let `default`: AgentConfig = {
         let env = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let appSupport = "\(home)/Library/Application Support/DoubaoVoiceWeTypeAgent"
+        let configPath = env["DOUBAO_AGENT_CONFIG_PATH"] ?? "\(appSupport)/config.json"
         let voiceID = env["VOICE_IME_ID"] ?? "com.bytedance.inputmethod.doubaoime.pinyin"
         let aliasValue = env["VOICE_IME_ALIASES"] ?? "com.bytedance.inputmethod.doubaoime"
         let aliases = Set(aliasValue.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) })
+        let defaultVoiceSettleDelayMs: UInt32 = 500
+
+        ensureDefaultConfigFile(
+            path: configPath,
+            voiceSettleDelayMs: defaultVoiceSettleDelayMs
+        )
 
         return AgentConfig(
+            launchdLabel: env["AGENT_LAUNCHD_LABEL"] ?? "com.github.Coco422.doubao-voice-wetype-agent",
             restoreInputID: env["RESTORE_IME_ID"] ?? "com.tencent.inputmethod.wetype.pinyin",
             voiceInputID: voiceID,
             voiceInputAliases: aliases.union([voiceID]),
+            configPath: configPath,
             logPath: env["DOUBAO_AGENT_LOG_PATH"] ?? "\(home)/Library/Logs/doubao-voice-wetype-agent.log",
-            statusPath: env["DOUBAO_AGENT_STATUS_PATH"] ?? "\(appSupport)/status.json"
+            statusPath: env["DOUBAO_AGENT_STATUS_PATH"] ?? "\(appSupport)/status.json",
+            defaultVoiceSettleDelayMs: defaultVoiceSettleDelayMs
         )
     }()
 }
@@ -53,6 +76,71 @@ struct RuntimeSnapshot {
     let lastEvent: String
     let lastError: String?
     let tapRestartCount: Int
+}
+
+func ensureDefaultConfigFile(path: String, voiceSettleDelayMs: UInt32) {
+    let url = URL(fileURLWithPath: path)
+    guard !FileManager.default.fileExists(atPath: path) else { return }
+    let payload: [String: Any] = [
+        "voiceSettleDelayMs": voiceSettleDelayMs
+    ]
+
+    guard JSONSerialization.isValidJSONObject(payload),
+          let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
+        return
+    }
+
+    try? FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try? data.write(to: url, options: .atomic)
+}
+
+func persistentConfig(path: String) -> [String: Any] {
+    let url = URL(fileURLWithPath: path)
+    guard let data = try? Data(contentsOf: url),
+          let object = try? JSONSerialization.jsonObject(with: data),
+          let config = object as? [String: Any] else {
+        return [:]
+    }
+    return config
+}
+
+func configuredUInt32(
+    configPath: String,
+    fileKey: String,
+    envKey: String,
+    defaultValue: UInt32,
+    range: ClosedRange<UInt32>
+) -> UInt32 {
+    if let envValue = ProcessInfo.processInfo.environment[envKey],
+       let parsed = parseUInt32(envValue) {
+        return clampUInt32(parsed, to: range)
+    }
+
+    if let parsed = parseUInt32(persistentConfig(path: configPath)[fileKey]) {
+        return clampUInt32(parsed, to: range)
+    }
+
+    return defaultValue
+}
+
+func parseUInt32(_ value: Any?) -> UInt32? {
+    if let number = value as? NSNumber {
+        let intValue = number.intValue
+        return intValue >= 0 ? UInt32(intValue) : nil
+    }
+
+    if let string = value as? String {
+        return UInt32(string.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    return nil
+}
+
+func clampUInt32(_ value: UInt32, to range: ClosedRange<UInt32>) -> UInt32 {
+    return min(max(value, range.lowerBound), range.upperBound)
 }
 
 final class RuntimeState {
@@ -168,7 +256,7 @@ func waitForInput(_ id: String, timeoutMs: Int = 500) -> Bool {
     return false
 }
 
-func selectAndSettleInput(_ id: String, settleMs: UInt32 = 260) -> Bool {
+func selectAndSettleInput(_ id: String, settleMs: UInt32) -> Bool {
     guard selectInput(id) else { return false }
     guard waitForInput(id, timeoutMs: 600) else { return false }
     usleep(settleMs * 1000)
@@ -218,6 +306,8 @@ func writeStatusFile(_ snapshot: RuntimeSnapshot) {
     let payload: [String: Any] = [
         "updatedAt": ISO8601DateFormatter().string(from: Date()),
         "pid": ProcessInfo.processInfo.processIdentifier,
+        "configPath": config.configPath,
+        "voiceSettleDelayMs": config.voiceSettleDelayMs,
         "mode": snapshot.mode.rawValue,
         "eventTapReady": snapshot.eventTapReady,
         "accessibilityOK": snapshot.accessibilityOK,
