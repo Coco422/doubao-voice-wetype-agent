@@ -99,6 +99,7 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func refreshCurrentInput() {
         let id = currentInputID() ?? "unknown"
         mutateRuntime { $0.currentInputID = id }
+        refreshVoiceShortcutCache()
     }
 
     func refreshPermissions(requestPrompt: Bool) {
@@ -216,8 +217,8 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenuItem.title = "Status: \(snapshot.mode.rawValue)"
         permissionsMenuItem.title = "Permissions: AX \(snapshot.accessibilityOK ? "OK" : "missing") / Input \(snapshot.inputMonitoringOK ? "OK" : "missing")"
         inputMenuItem.title = "Current input: \(displayInputName(snapshot.currentInputID))"
-        timingMenuItem.title = "Voice timing: settle \(config.voiceSettleDelayMs) ms / probe \(config.voiceActivationProbeTimeoutMs) ms"
-        activationMenuItem.title = "Activation: \(snapshot.lastActivationResult) / attempts \(snapshot.activationAttemptCount)"
+        timingMenuItem.title = "Voice: \(voiceShortcutDescription()) / trigger \(config.voiceSettleDelayMs) ms / restore \(config.restoreInputDelayMs) ms"
+        activationMenuItem.title = "Activation: \(snapshot.lastActivationResult)"
         probeWindowMenuItem.title = "Probe window: \(snapshot.lastProbeWindow ?? "none")"
         tapMenuItem.title = "Tap: \(snapshot.eventTapReady ? "enabled" : "disabled") / restarts \(snapshot.tapRestartCount)"
         lastEventMenuItem.title = "Last: \(snapshot.lastEvent)"

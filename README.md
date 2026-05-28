@@ -3,30 +3,29 @@
 A tiny macOS menu bar agent for this workflow:
 
 - Keep WeType as the everyday input method.
-- Hold `Command + Option` to temporarily switch to Doubao IME.
-- Replay a clean `Command + Option` hold so Doubao's voice input starts.
-- Release `Command + Option` to end voice input and switch back to WeType.
+- Hold the configured voice shortcut, default `Command + Option`, to temporarily switch to Doubao IME.
+- Replay a clean hold of that same configured shortcut so Doubao's voice input starts.
+- Release the shortcut to end voice input and switch back to WeType.
 - If Doubao IME is already active, leave the shortcut alone.
 
 It is not an IME plugin and does not modify Doubao or WeType. It is a small Swift app that combines the macOS Text Input Source API with a Quartz event tap.
 
 ## Why This Exists
 
-Doubao voice input is a hold-to-talk shortcut. If you press `Command + Option` while another IME is active, then switch to Doubao afterward, Doubao may miss the original key-down event.
+Doubao voice input is a hold-to-talk shortcut. If you press its configured shortcut while another IME is active, then switch to Doubao afterward, Doubao may miss the original key-down event.
 
 This agent handles that ordering:
 
 ```text
-physical Cmd+Option down
+physical configured shortcut down
   -> suppress original event
   -> switch to Doubao IME
   -> wait until macOS confirms the switch
   -> wait a short settle delay
-  -> post synthetic Cmd+Option down
-  -> check whether Doubao's bottom voice UI panel appears
-  -> keep synthetic Cmd+Option held and refresh down attempts while physical keys remain held, if needed
+  -> post the configured Doubao voice shortcut down
   -> wait for physical release
-  -> post synthetic Cmd+Option up
+  -> post the configured Doubao voice shortcut up
+  -> wait before restoring the previous IME
   -> switch back to WeType
 ```
 
@@ -181,14 +180,16 @@ The agent keeps a persistent config file at:
 ~/Library/Application Support/DoubaoVoiceWeTypeAgent/config.json
 ```
 
-The default voice settle delay is `200` ms:
+The default voice trigger delay is `300` ms:
 
 ```json
 {
-  "voiceActivationMaxAttempts": 0,
-  "voiceActivationProbeTimeoutMs": 280,
-  "voiceActivationRetryGapMs": 90,
-  "voiceSettleDelayMs": 200,
+  "restoreInputDelayMs": 2000,
+  "voiceSettleDelayMs": 300,
+  "voiceShortcutModifiers": [
+    "cmd",
+    "option"
+  ],
   "voiceUIWindowOwnerNames": [
     "DoubaoIme",
     "Doubao",
@@ -197,19 +198,16 @@ The default voice settle delay is `200` ms:
 }
 ```
 
-`voiceSettleDelayMs` is the extra wait after macOS reports Doubao as the active input source and before the first synthetic `Command + Option` down. The agent then probes Doubao-related windows, but only treats a small visible panel near the bottom of a display as the voice UI. If no voice UI appears, it keeps synthetic `Command + Option` held, waits `voiceActivationRetryGapMs`, and refreshes the synthetic down attempt while the physical shortcut is still held. Once that bottom voice panel is detected, retrying stops. Synthetic up is sent only on physical release, cancellation, or bounded failure.
+`voiceSettleDelayMs` is the wait after macOS reports Doubao as the active input source and before the agent posts the configured Doubao voice shortcut down. `voiceShortcutModifiers` is both the physical shortcut the agent listens for and the shortcut configured inside Doubao for hold-to-talk voice input; the default is your current `Command + Option`. Supported modifier names are `cmd`, `option`, `control`, and `shift`. `restoreInputDelayMs` is the delay after release before switching back to WeType.
 
-`voiceActivationMaxAttempts` controls that bound. `0` means no attempt cap: keep retrying until the physical shortcut is released. A positive value stops after that many attempts, posts synthetic up, restores WeType, and logs activation failure.
-
-If Doubao's voice UI uses a different process or window owner name on your machine, run `Run voice probe diagnostics` from the menu and add the observed owner name to `voiceUIWindowOwnerNames`. Diagnostics logs new visible windows with `matchConfiguredOwner=true/false`, `likelyVoicePanel=true/false`, owner, name, and bounds.
+The main activation path no longer probes UI windows or retries. `Run voice probe diagnostics` is only for troubleshooting; it logs new visible windows with `matchConfiguredOwner=true/false`, `likelyVoicePanel=true/false`, owner, name, and bounds.
 
 You can also override it from LaunchAgent with:
 
 ```text
-VOICE_SETTLE_DELAY_MS=700
-VOICE_ACTIVATION_MAX_ATTEMPTS=0
-VOICE_ACTIVATION_PROBE_TIMEOUT_MS=280
-VOICE_ACTIVATION_RETRY_GAP_MS=90
+VOICE_SETTLE_DELAY_MS=300
+RESTORE_INPUT_DELAY_MS=2000
+VOICE_SHORTCUT_MODIFIERS=cmd,option
 VOICE_UI_WINDOW_OWNER_NAMES=DoubaoIme,Doubao,豆包
 ```
 
@@ -252,5 +250,5 @@ Keeping the app in place is better for update stability.
 ## Caveats
 
 - Rebuilding or replacing the binary can make macOS ask for permissions again.
-- Third-party IMEs may report as selected before their own shortcut monitors are ready. The agent uses a confirmation loop, voice UI window probing, and a hold-driven retry loop, but timing can still be system-dependent.
-- The agent listens only for `flagsChanged` events and the exact `Command + Option` modifier combination.
+- Third-party IMEs may report as selected before their own shortcut monitors are ready. The agent uses a confirmation loop plus a configurable trigger delay, but timing can still be system-dependent.
+- The agent listens only for `flagsChanged` events and a modifier-only shortcut configured by `voiceShortcutModifiers`.

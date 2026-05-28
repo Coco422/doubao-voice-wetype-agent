@@ -32,9 +32,9 @@ launchctl kickstart -k gui/$(id -u)/com.github.Coco422.doubao-voice-wetype-agent
 
 ## Voice input does not start, but the IME switches
 
-This is usually timing-related. The IME may report as selected before its shortcut monitor is ready. The agent waits for the selected input source, adds a small settle delay, posts synthetic `Command + Option` down, and then checks whether Doubao's small bottom voice UI panel appears. If no voice UI appears, it keeps synthetic `Command + Option` held and refreshes down attempts while the physical shortcut is still held. Once that bottom voice panel appears, retrying stops.
+This is usually timing-related or shortcut-mapping-related. The agent waits for the selected input source, adds a small trigger delay, then posts the configured Doubao voice shortcut down. It keeps that synthetic shortcut held until the physical shortcut is released, then posts the same shortcut up and waits before restoring WeType.
 
-Open the menu bar item and check `Voice settle delay`. You can edit the persistent config:
+Open the menu bar item and check `Voice timing`. You can edit the persistent config:
 
 ```bash
 open "$HOME/Library/Application Support/DoubaoVoiceWeTypeAgent/config.json"
@@ -44,10 +44,12 @@ The default timing config is:
 
 ```json
 {
-  "voiceActivationMaxAttempts": 0,
-  "voiceActivationProbeTimeoutMs": 280,
-  "voiceActivationRetryGapMs": 90,
-  "voiceSettleDelayMs": 200,
+  "restoreInputDelayMs": 2000,
+  "voiceSettleDelayMs": 300,
+  "voiceShortcutModifiers": [
+    "cmd",
+    "option"
+  ],
   "voiceUIWindowOwnerNames": [
     "DoubaoIme",
     "Doubao",
@@ -56,9 +58,7 @@ The default timing config is:
 }
 ```
 
-If Doubao switches in but voice input does not appear, first check whether the log says `voice UI detected`. If it never detects a window, run `Run voice probe diagnostics` from the menu while manually opening Doubao voice input, then add the observed owner name to `voiceUIWindowOwnerNames`. Diagnostics logs each new visible window with `matchConfiguredOwner=true/false`, `likelyVoicePanel=true/false`, owner, name, and bounds so an unknown Doubao process can still be discovered.
-
-`voiceActivationMaxAttempts=0` means retry until you release the physical shortcut. Use a positive value only if you want bounded failure behavior.
+Make sure `voiceShortcutModifiers` matches the voice shortcut configured inside Doubao. The agent uses it both for the physical shortcut it listens for and the synthetic shortcut it replays. The default is `cmd,option`, and supported modifier names are `cmd`, `option`, `control`, and `shift`. If Doubao switches in but voice input does not start, try increasing `voiceSettleDelayMs`, for example `500` or `700`. If restore happens too soon after release, increase `restoreInputDelayMs`.
 
 Check the log:
 
@@ -69,15 +69,14 @@ tail -100 "$HOME/Library/Logs/doubao-voice-wetype-agent.log"
 Look for:
 
 ```text
-physical cmd+option down
-activation 1 attempt 1 start
-voice UI detected
-physical cmd+option released
-posted cmd+option up
+physical voice shortcut down
+voice shortcut down posted
+physical voice shortcut released
+voice shortcut up posted
 restored input
 ```
 
-If repeated attempts log `no voice UI detected`, the IME did not react to the synthetic hold or the probe is not matching the right window owner. Tune `voiceUIWindowOwnerNames` before increasing settle delay.
+`Run voice probe diagnostics` is still available from the menu, but it is diagnostic only. The main activation path no longer depends on window detection.
 
 ## The current input source ID is unknown
 

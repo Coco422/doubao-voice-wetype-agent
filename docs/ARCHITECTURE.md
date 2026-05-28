@@ -14,7 +14,7 @@ LaunchAgent
       -> Quartz event tap
       -> TIS input source switching
       -> synthetic modifier events
-      -> Doubao voice UI window probing
+      -> optional Doubao window diagnostics
 ```
 
 DMG distribution installs the app bundle to `~/Applications/Doubao Voice WeType Agent.app`.
@@ -25,7 +25,7 @@ The installer command and the app's first-launch self-install path both write th
 ```text
 ready
  |
- | physical Cmd+Option down
+ | physical configured shortcut down
  v
 check current input source
  |
@@ -36,30 +36,18 @@ switching
  | worker uses captured source
  | select voice IME if needed
  | wait for current input source to match
- | settle briefly
- | snapshot Doubao-related visible windows
- |
+ | wait trigger delay
+ | post configured Doubao voice shortcut down
  v
-activation loop
- |
- | post synthetic Cmd+Option down
- | probe for a new bottom Doubao voice UI panel
- |-- detected --> holding
- |-- not detected --> keep synthetic hold down and refresh down while physical keys remain held
- |
- | bounded attempts exhausted
- v
-restore input and mark activation failure
- |
- v
-ready
+holding
 
 holding
  |
- | physical Cmd+Option release
+ | physical configured shortcut release
  v
-post synthetic Cmd+Option up
+post configured Doubao voice shortcut up
  |
+ | wait restore delay
  | select restore IME
  v
 ready
@@ -67,13 +55,13 @@ ready
 
 ## Why Replay Events
 
-Doubao voice input is triggered by a hold-style shortcut. If the user presses `Command + Option` before Doubao is active, Doubao may not observe the key-down transition. The agent suppresses the original modifier transition, switches IME, waits for confirmation, then posts synthetic hold attempts that Doubao can observe from the start.
+Doubao voice input is triggered by a user-configured hold-style shortcut. If the user presses that shortcut while another IME is active, then Doubao may not observe the key-down transition after the app switches IMEs. The agent suppresses the original modifier transition, switches to Doubao, waits for a configurable trigger delay, then posts the configured Doubao voice shortcut down so Doubao can observe the hold from the start.
 
-After each synthetic key-down, the agent checks whether Doubao exposes a new visible voice UI panel. The probe intentionally ignores generic Doubao windows and only accepts a small panel near the bottom of a display, matching the voice input UI that appears above the input bar. If not detected, it keeps the synthetic hold down and refreshes the down attempt while the physical keys remain held. After detection, it stops retrying and waits for the physical release. The release side posts synthetic key-up only if a synthetic down is still active, so the simulated hold follows the user's real hold instead of bouncing between attempts.
+The release side posts the same configured shortcut up, waits before restoring the previous IME, then switches back. The main activation path does not probe UI windows or retry. Window probing remains as a diagnostics menu item only.
 
 ## Event Tap Hygiene
 
-The event tap callback is kept short. It performs only the first input-source check needed to preserve the "already Doubao IME means pass through" rule. Slower operations such as selecting an IME, waiting for confirmation, sleeping for settle delays, probing windows, and posting synthetic sequences run on a serial worker queue.
+The event tap callback is kept short. It performs only the first input-source check needed to preserve the "already Doubao IME means pass through" rule. Slower operations such as selecting an IME, waiting for confirmation, sleeping for trigger/restore delays, and posting synthetic sequences run on a serial worker queue.
 
 Synthetic events are marked with `eventSourceUserData`, and the event tap ignores events carrying that marker. Without this guard, the agent would observe and recursively process its own generated modifier events.
 
@@ -97,10 +85,12 @@ Timing configuration is persisted in `config.json`:
 
 ```json
 {
-  "voiceActivationMaxAttempts": 0,
-  "voiceActivationProbeTimeoutMs": 280,
-  "voiceActivationRetryGapMs": 90,
-  "voiceSettleDelayMs": 200,
+  "restoreInputDelayMs": 2000,
+  "voiceSettleDelayMs": 300,
+  "voiceShortcutModifiers": [
+    "cmd",
+    "option"
+  ],
   "voiceUIWindowOwnerNames": [
     "DoubaoIme",
     "Doubao",
@@ -109,7 +99,7 @@ Timing configuration is persisted in `config.json`:
 }
 ```
 
-`voiceSettleDelayMs` is the wait after macOS confirms the voice IME is selected and before the first synthetic `Command + Option` down is posted. The activation loop then probes for new visible windows owned by the configured Doubao owner names and only accepts the small bottom voice panel as success. `voiceActivationMaxAttempts=0` means the loop has no attempt cap and stops on physical release; a positive value bounds attempts and restores WeType after failure. The diagnostics menu item observes all new visible windows for a short window and logs whether each one matches those names and the bottom-panel heuristic, which helps discover owner names without Screen Recording permission. Timing values can be overridden with `VOICE_SETTLE_DELAY_MS`, `VOICE_ACTIVATION_MAX_ATTEMPTS`, `VOICE_ACTIVATION_PROBE_TIMEOUT_MS`, `VOICE_ACTIVATION_RETRY_GAP_MS`, and `VOICE_UI_WINDOW_OWNER_NAMES`.
+`voiceSettleDelayMs` is the delay after macOS confirms the voice IME is selected and before the configured Doubao voice shortcut is posted down. `voiceShortcutModifiers` is the modifier-only shortcut the agent listens for and replays; it must match the hold-to-talk shortcut configured inside Doubao. By default it is `cmd,option`; supported names are `cmd`, `option`, `control`, and `shift`. `restoreInputDelayMs` is the delay after the physical release before restoring WeType. The diagnostics menu item observes new visible windows and logs whether they match configured Doubao owner names; it does not participate in normal activation. Timing values can be overridden with `VOICE_SETTLE_DELAY_MS`, `RESTORE_INPUT_DELAY_MS`, `VOICE_SHORTCUT_MODIFIERS`, and `VOICE_UI_WINDOW_OWNER_NAMES`.
 
 ## Files
 

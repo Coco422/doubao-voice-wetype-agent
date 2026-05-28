@@ -12,7 +12,7 @@ extension AgentApp {
             return Unmanaged.passUnretained(event)
         }
 
-        let comboDown = isCmdOptionOnly(event.flags)
+        let comboDown = isVoiceShortcutOnly(event.flags)
         if comboDown {
             return handleComboDownEvent(event)
         }
@@ -87,17 +87,16 @@ extension AgentApp {
             $0.managingHold = true
             $0.passThroughPhysicalCombo = false
             $0.syntheticDownPosted = false
-            $0.activationAttemptCount = 0
             $0.lastActivationResult = "starting"
             $0.lastProbeWindow = nil
             $0.lastProbeWindowOwner = nil
             $0.lastProbeWindowName = nil
             $0.lastProbeWindowBounds = nil
-            $0.lastEvent = "cmd+option down"
+            $0.lastEvent = "\(voiceShortcutDescription()) down"
             $0.lastError = nil
         }
         updateStatusUI()
-        log("physical cmd+option down; activationID=\(activationID)")
+        log("physical voice shortcut down modifiers=\(voiceShortcutDescription()); activationID=\(activationID)")
         return activationID
     }
 
@@ -111,9 +110,9 @@ extension AgentApp {
             passThrough = $0.passThroughPhysicalCombo
             activationID = $0.activationID
             $0.passThroughPhysicalCombo = false
-            $0.lastEvent = "cmd+option released, flags=\(flags), managed=\(managing)"
+            $0.lastEvent = "\(voiceShortcutDescription()) released, flags=\(flags), managed=\(managing)"
         }
-        log("physical cmd+option released; flags=\(flags), managing=\(managing), activationID=\(activationID)")
+        log("physical voice shortcut released; flags=\(flags), managing=\(managing), activationID=\(activationID)")
 
         if passThrough {
             log("already voice input passthrough release")
@@ -135,7 +134,6 @@ extension AgentApp {
         }
 
         let current = initialInputID
-        let settleMs = config.voiceSettleDelayMs
         recordWorkerComboDown(current, activationID: activationID)
 
         guard isActivationCurrent(activationID) else {
@@ -143,7 +141,7 @@ extension AgentApp {
             return
         }
 
-        guard prepareVoiceInput(current: current, settleMs: settleMs) else {
+        guard prepareVoiceInput(current: current) else {
             failAndRestoreManagedHold(
                 activationID: activationID,
                 event: "failed to switch voice input",
@@ -153,7 +151,12 @@ extension AgentApp {
             return
         }
 
-        runVoiceActivationLoop(activationID: activationID)
+        guard sleepWhileHoldActive(activationID: activationID, milliseconds: config.voiceSettleDelayMs) else {
+            cancelActivationBeforeReady(activationID: activationID)
+            return
+        }
+
+        triggerVoiceStart(activationID: activationID)
     }
 
     private func failAndRestoreManagedHold(activationID: Int, event: String, error: String) {
@@ -183,14 +186,15 @@ extension AgentApp {
         mutateRuntime { $0.mode = .switching }
         updateStatusUIOnMain()
 
-        let syntheticDownPosted = readRuntime { $0.syntheticDownPosted }
-        if syntheticDownPosted {
-            postCmdOptUp()
-            usleep(150_000)
+        let startPosted = readRuntime { $0.syntheticDownPosted }
+        if startPosted {
+            postVoiceShortcutUp()
+            log("activation \(activationID) voice shortcut up posted")
         } else {
-            log("release without synthetic down; skip synthetic up")
+            log("release before voice shortcut down; skip shortcut up")
         }
 
+        usleep(config.restoreInputDelayMs * 1000)
         restoreAfterManagedHold()
         updateStatusUIOnMain()
     }
@@ -221,139 +225,35 @@ extension AgentApp {
         mutateRuntime {
             $0.currentInputID = current
             $0.originalInputID = current
-            $0.lastEvent = "cmd+option down, current=\(displayInputName(current))"
+            $0.lastEvent = "\(voiceShortcutDescription()) down, current=\(displayInputName(current))"
         }
         log("activation \(activationID) current input=\(current)")
     }
 
-    private func prepareVoiceInput(current: String, settleMs: UInt32) -> Bool {
-        log("switching to voice input; voiceSettleDelayMs=\(settleMs)")
+    private func prepareVoiceInput(current: String) -> Bool {
+        log("switching to voice input; triggerDelayMs=\(config.voiceSettleDelayMs)")
         if isVoiceInput(current) {
-            usleep(settleMs * 1000)
             return true
         }
-        return selectAndSettleInput(config.voiceInputID, settleMs: settleMs)
+        return selectAndSettleInput(config.voiceInputID, settleMs: 0)
     }
 
-    private func runVoiceActivationLoop(activationID: Int) {
-        let probe = VoiceUIProbe(ownerNames: config.voiceUIWindowOwnerNames)
-        let baseline = probe.snapshot()
-        log("activation \(activationID) voice probe baseline windows=\(baseline.count)")
-
-        var attempt = 1
-        while true {
-            guard isHoldActive(activationID) else {
-                markActivationReleasedBeforeReady(activationID: activationID)
-                return
-            }
-
-            if tryVoiceActivationAttempt(activationID: activationID, attempt: attempt, baseline: baseline, probe: probe) { return }
-
-            guard isHoldActive(activationID) else {
-                cancelActivationBeforeReady(activationID: activationID)
-                return
-            }
-
-            if shouldStopActivationAttempts(attempt: attempt) {
-                markVoiceActivationFailed(activationID: activationID)
-                return
-            }
-
-            guard sleepWhileHoldActive(activationID: activationID, milliseconds: config.voiceActivationRetryGapMs) else {
-                cancelActivationBeforeReady(activationID: activationID)
-                return
-            }
-            attempt += 1
-        }
-    }
-
-    private func tryVoiceActivationAttempt(
-        activationID: Int,
-        attempt: Int,
-        baseline: [VoiceUIWindow],
-        probe: VoiceUIProbe
-    ) -> Bool {
-        markActivationAttempt(activationID: activationID, attempt: attempt)
+    private func triggerVoiceStart(activationID: Int) {
         guard isHoldActive(activationID) else {
-            mutateRuntime {
-                $0.lastActivationResult = "attempt \(attempt) cancelled before synthetic down"
-            }
-            log("activation \(activationID) attempt \(attempt) cancelled before synthetic down")
-            return false
+            cancelActivationBeforeReady(activationID: activationID)
+            return
         }
 
-        postCmdOptDown()
-        mutateRuntime { $0.syntheticDownPosted = true }
-
-        if let window = probe.waitForNewWindow(
-            baseline: baseline,
-            timeoutMs: config.voiceActivationProbeTimeoutMs,
-            shouldContinue: { self.isHoldActive(activationID) }
-        ) {
-            markVoiceActivationSuccess(window: window, attempt: attempt)
-            return true
-        }
-
-        guard isHoldActive(activationID) else {
-            releaseSyntheticHoldIfNeeded()
-            mutateRuntime {
-                $0.lastActivationResult = "attempt \(attempt) cancelled"
-            }
-            log("activation \(activationID) attempt \(attempt) cancelled before voice UI detected")
-            return false
-        }
-
-        mutateRuntime {
-            $0.syntheticDownPosted = true
-            $0.lastActivationResult = "attempt \(attempt) no voice UI; keeping down"
-        }
-        log("activation \(activationID) attempt \(attempt) no voice UI detected; keeping synthetic down")
-        return false
-    }
-
-    private func markActivationAttempt(activationID: Int, attempt: Int) {
-        mutateRuntime {
-            $0.activationAttemptCount = attempt
-            $0.lastActivationResult = "attempt \(attempt) probing"
-            $0.lastEvent = "voice activation attempt \(attempt)"
-            $0.lastError = nil
-        }
-        log("activation \(activationID) attempt \(attempt) start")
-        updateStatusUIOnMain()
-    }
-
-    private func markVoiceActivationSuccess(window: VoiceUIWindow, attempt: Int) {
+        postVoiceShortcutDown()
         mutateRuntime {
             $0.mode = .holding
             $0.syntheticDownPosted = true
             $0.currentInputID = config.voiceInputID
-            $0.lastEvent = "voice UI detected on attempt \(attempt)"
-            $0.lastActivationResult = "detected on attempt \(attempt)"
-            $0.lastProbeWindow = window.logDescription
-            $0.lastProbeWindowOwner = window.ownerName
-            $0.lastProbeWindowName = window.windowName
-            $0.lastProbeWindowBounds = window.boundsDescription
+            $0.lastEvent = "voice shortcut down posted"
+            $0.lastActivationResult = "voice shortcut down posted"
             $0.lastError = nil
         }
-        log("voice UI detected attempt=\(attempt) \(window.logDescription)")
-        updateStatusUIOnMain()
-    }
-
-    private func markVoiceActivationFailed(activationID: Int) {
-        guard isActivationCurrent(activationID) else {
-            log("activation \(activationID) failed after becoming stale; skip")
-            return
-        }
-
-        releaseSyntheticHoldIfNeeded()
-        mutateRuntime {
-            $0.managingHold = false
-            $0.passThroughPhysicalCombo = false
-            $0.syntheticDownPosted = false
-            $0.lastActivationResult = "failed after \($0.activationAttemptCount) attempts"
-        }
-        log("voice activation failed activationID=\(activationID)")
-        restoreAfterManagedHold(event: "voice activation failed; restored input", error: "voice UI not detected")
+        log("activation \(activationID) voice shortcut down posted")
         updateStatusUIOnMain()
     }
 
@@ -367,7 +267,7 @@ extension AgentApp {
             return
         }
 
-        releaseSyntheticHoldIfNeeded()
+        releaseVoiceShortcutIfNeeded()
         mutateRuntime {
             $0.lastEvent = "released before voice input became ready"
             $0.lastActivationResult = "cancelled by release"
@@ -375,20 +275,15 @@ extension AgentApp {
             $0.passThroughPhysicalCombo = false
             $0.syntheticDownPosted = false
         }
-        log("activation \(activationID) cancelled before voice UI detected")
-        restoreAfterManagedHold(event: "released before voice UI; restored input")
+        log("activation \(activationID) cancelled before voice shortcut down")
+        restoreAfterManagedHold(event: "released before voice shortcut; restored input")
         updateStatusUIOnMain()
     }
 
-    private func shouldStopActivationAttempts(attempt: Int) -> Bool {
-        let maxAttempts = config.voiceActivationMaxAttempts
-        return maxAttempts > 0 && attempt >= maxAttempts
-    }
-
-    private func releaseSyntheticHoldIfNeeded() {
+    private func releaseVoiceShortcutIfNeeded() {
         let syntheticDownPosted = readRuntime { $0.syntheticDownPosted }
         guard syntheticDownPosted else { return }
-        postCmdOptUp()
+        postVoiceShortcutUp()
         mutateRuntime { $0.syntheticDownPosted = false }
     }
 

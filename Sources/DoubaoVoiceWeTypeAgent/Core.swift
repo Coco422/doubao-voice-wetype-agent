@@ -12,17 +12,15 @@ struct AgentConfig {
     let logPath: String
     let statusPath: String
     let defaultVoiceSettleDelayMs: UInt32
-    let defaultVoiceActivationMaxAttempts: UInt32
-    let defaultVoiceActivationProbeTimeoutMs: UInt32
-    let defaultVoiceActivationRetryGapMs: UInt32
+    let defaultRestoreInputDelayMs: UInt32
+    let defaultVoiceShortcutModifiers: [String]
     let defaultVoiceUIWindowOwnerNames: [String]
 
     var defaultPersistentConfig: [String: Any] {
         [
             "voiceSettleDelayMs": defaultVoiceSettleDelayMs,
-            "voiceActivationMaxAttempts": defaultVoiceActivationMaxAttempts,
-            "voiceActivationProbeTimeoutMs": defaultVoiceActivationProbeTimeoutMs,
-            "voiceActivationRetryGapMs": defaultVoiceActivationRetryGapMs,
+            "restoreInputDelayMs": defaultRestoreInputDelayMs,
+            "voiceShortcutModifiers": defaultVoiceShortcutModifiers,
             "voiceUIWindowOwnerNames": defaultVoiceUIWindowOwnerNames
         ]
     }
@@ -37,33 +35,22 @@ struct AgentConfig {
         )
     }
 
-    var voiceActivationMaxAttempts: Int {
-        Int(configuredUInt32(
-            configPath: configPath,
-            fileKey: "voiceActivationMaxAttempts",
-            envKey: "VOICE_ACTIVATION_MAX_ATTEMPTS",
-            defaultValue: defaultVoiceActivationMaxAttempts,
-            range: 0...100
-        ))
-    }
-
-    var voiceActivationProbeTimeoutMs: UInt32 {
+    var restoreInputDelayMs: UInt32 {
         configuredUInt32(
             configPath: configPath,
-            fileKey: "voiceActivationProbeTimeoutMs",
-            envKey: "VOICE_ACTIVATION_PROBE_TIMEOUT_MS",
-            defaultValue: defaultVoiceActivationProbeTimeoutMs,
-            range: 50...2_000
+            fileKey: "restoreInputDelayMs",
+            envKey: "RESTORE_INPUT_DELAY_MS",
+            defaultValue: defaultRestoreInputDelayMs,
+            range: 0...5_000
         )
     }
 
-    var voiceActivationRetryGapMs: UInt32 {
-        configuredUInt32(
+    var voiceShortcutModifiers: [String] {
+        configuredStringArray(
             configPath: configPath,
-            fileKey: "voiceActivationRetryGapMs",
-            envKey: "VOICE_ACTIVATION_RETRY_GAP_MS",
-            defaultValue: defaultVoiceActivationRetryGapMs,
-            range: 0...2_000
+            fileKey: "voiceShortcutModifiers",
+            envKey: "VOICE_SHORTCUT_MODIFIERS",
+            defaultValue: defaultVoiceShortcutModifiers
         )
     }
 
@@ -84,17 +71,15 @@ struct AgentConfig {
         let voiceID = env["VOICE_IME_ID"] ?? "com.bytedance.inputmethod.doubaoime.pinyin"
         let aliasValue = env["VOICE_IME_ALIASES"] ?? "com.bytedance.inputmethod.doubaoime"
         let aliases = Set(aliasValue.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) })
-        let defaultVoiceSettleDelayMs: UInt32 = 200
-        let defaultMaxAttempts: UInt32 = 0
-        let defaultProbeTimeoutMs: UInt32 = 280
-        let defaultRetryGapMs: UInt32 = 90
+        let defaultVoiceSettleDelayMs: UInt32 = 300
+        let defaultRestoreDelayMs: UInt32 = 2_000
+        let defaultVoiceShortcutModifiers = ["cmd", "option"]
         let defaultOwnerNames = ["DoubaoIme", "Doubao", "豆包"]
 
         ensureDefaultConfigFile(path: configPath, defaults: [
             "voiceSettleDelayMs": defaultVoiceSettleDelayMs,
-            "voiceActivationMaxAttempts": defaultMaxAttempts,
-            "voiceActivationProbeTimeoutMs": defaultProbeTimeoutMs,
-            "voiceActivationRetryGapMs": defaultRetryGapMs,
+            "restoreInputDelayMs": defaultRestoreDelayMs,
+            "voiceShortcutModifiers": defaultVoiceShortcutModifiers,
             "voiceUIWindowOwnerNames": defaultOwnerNames
         ])
 
@@ -107,9 +92,8 @@ struct AgentConfig {
             logPath: env["DOUBAO_AGENT_LOG_PATH"] ?? "\(home)/Library/Logs/doubao-voice-wetype-agent.log",
             statusPath: env["DOUBAO_AGENT_STATUS_PATH"] ?? "\(appSupport)/status.json",
             defaultVoiceSettleDelayMs: defaultVoiceSettleDelayMs,
-            defaultVoiceActivationMaxAttempts: defaultMaxAttempts,
-            defaultVoiceActivationProbeTimeoutMs: defaultProbeTimeoutMs,
-            defaultVoiceActivationRetryGapMs: defaultRetryGapMs,
+            defaultRestoreInputDelayMs: defaultRestoreDelayMs,
+            defaultVoiceShortcutModifiers: defaultVoiceShortcutModifiers,
             defaultVoiceUIWindowOwnerNames: defaultOwnerNames
         )
     }()
@@ -140,7 +124,6 @@ struct RuntimeSnapshot {
     let lastEvent: String
     let lastError: String?
     let tapRestartCount: Int
-    let activationAttemptCount: Int
     let lastActivationResult: String
     let lastProbeWindow: String?
     let lastProbeWindowOwner: String?
@@ -261,7 +244,6 @@ final class RuntimeState {
     var lastError: String?
     var tapRestartCount = 0
     var activationID = 0
-    var activationAttemptCount = 0
     var lastActivationResult = "not attempted"
     var lastProbeWindow: String?
     var lastProbeWindowOwner: String?
@@ -324,7 +306,6 @@ func snapshotRuntime() -> RuntimeSnapshot {
             lastEvent: $0.lastEvent,
             lastError: $0.lastError,
             tapRestartCount: $0.tapRestartCount,
-            activationAttemptCount: $0.activationAttemptCount,
             lastActivationResult: $0.lastActivationResult,
             lastProbeWindow: $0.lastProbeWindow,
             lastProbeWindowOwner: $0.lastProbeWindowOwner,
@@ -386,26 +367,114 @@ func postModifier(_ keyCode: CGKeyCode, down: Bool, flags: CGEventFlags) {
     event.post(tap: .cghidEventTap)
 }
 
-func postCmdOptDown() {
-    postModifier(58, down: true, flags: [.maskAlternate])
-    usleep(25_000)
-    postModifier(55, down: true, flags: [.maskAlternate, .maskCommand])
-    log("posted cmd+option down")
+struct ModifierKeySpec {
+    let name: String
+    let keyCode: CGKeyCode
+    let flag: CGEventFlags
 }
 
-func postCmdOptUp() {
-    postModifier(55, down: false, flags: [.maskAlternate])
-    usleep(25_000)
-    postModifier(58, down: false, flags: [])
-    log("posted cmd+option up")
+struct VoiceShortcutDefinition {
+    let specs: [ModifierKeySpec]
+
+    var flags: CGEventFlags {
+        specs.reduce(CGEventFlags()) { partial, spec in
+            partial.union(spec.flag)
+        }
+    }
+
+    var description: String {
+        specs.map(\.name).joined(separator: "+")
+    }
+}
+
+final class VoiceShortcutCache {
+    private let lock = NSLock()
+    private var definition: VoiceShortcutDefinition
+
+    init(definition: VoiceShortcutDefinition) {
+        self.definition = definition
+    }
+
+    func read() -> VoiceShortcutDefinition {
+        lock.lock()
+        defer { lock.unlock() }
+        return definition
+    }
+
+    func update(_ newDefinition: VoiceShortcutDefinition) {
+        lock.lock()
+        definition = newDefinition
+        lock.unlock()
+    }
+}
+
+let voiceShortcutCache = VoiceShortcutCache(definition: makeVoiceShortcutDefinition(from: config.voiceShortcutModifiers))
+
+func cachedVoiceShortcutDefinition() -> VoiceShortcutDefinition {
+    return voiceShortcutCache.read()
+}
+
+func refreshVoiceShortcutCache() {
+    voiceShortcutCache.update(makeVoiceShortcutDefinition(from: config.voiceShortcutModifiers))
+}
+
+func makeVoiceShortcutDefinition(from modifiers: [String]) -> VoiceShortcutDefinition {
+    let specs = modifiers.compactMap(modifierKeySpec)
+    if specs.isEmpty {
+        return VoiceShortcutDefinition(specs: ["cmd", "option"].compactMap(modifierKeySpec))
+    }
+    return VoiceShortcutDefinition(specs: specs)
+}
+
+func modifierKeySpec(_ raw: String) -> ModifierKeySpec? {
+    switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "cmd", "command":
+        return ModifierKeySpec(name: "cmd", keyCode: 55, flag: .maskCommand)
+    case "option", "alt":
+        return ModifierKeySpec(name: "option", keyCode: 58, flag: .maskAlternate)
+    case "control", "ctrl":
+        return ModifierKeySpec(name: "control", keyCode: 59, flag: .maskControl)
+    case "shift":
+        return ModifierKeySpec(name: "shift", keyCode: 56, flag: .maskShift)
+    default:
+        return nil
+    }
+}
+
+func postVoiceShortcutDown() {
+    var flags: CGEventFlags = []
+    let definition = cachedVoiceShortcutDefinition()
+    let specs = definition.specs
+    for spec in specs {
+        flags.insert(spec.flag)
+        postModifier(spec.keyCode, down: true, flags: flags)
+        usleep(25_000)
+    }
+    log("posted voice shortcut down modifiers=\(definition.description)")
+}
+
+func postVoiceShortcutUp() {
+    let definition = cachedVoiceShortcutDefinition()
+    let specs = definition.specs
+    var flags = definition.flags
+    for spec in specs.reversed() {
+        flags.remove(spec.flag)
+        postModifier(spec.keyCode, down: false, flags: flags)
+        usleep(25_000)
+    }
+    log("posted voice shortcut up modifiers=\(definition.description)")
 }
 
 func relevantFlags(_ flags: CGEventFlags) -> CGEventFlags {
     return flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift, .maskSecondaryFn])
 }
 
-func isCmdOptionOnly(_ flags: CGEventFlags) -> Bool {
-    return relevantFlags(flags) == [.maskCommand, .maskAlternate]
+func isVoiceShortcutOnly(_ flags: CGEventFlags) -> Bool {
+    return relevantFlags(flags) == cachedVoiceShortcutDefinition().flags
+}
+
+func voiceShortcutDescription() -> String {
+    return cachedVoiceShortcutDefinition().description
 }
 
 func modifierFlagDescription(_ flags: CGEventFlags) -> String {
@@ -435,9 +504,8 @@ func writeStatusFile(_ snapshot: RuntimeSnapshot) {
         "pid": ProcessInfo.processInfo.processIdentifier,
         "configPath": config.configPath,
         "voiceSettleDelayMs": config.voiceSettleDelayMs,
-        "voiceActivationMaxAttempts": config.voiceActivationMaxAttempts,
-        "voiceActivationProbeTimeoutMs": config.voiceActivationProbeTimeoutMs,
-        "voiceActivationRetryGapMs": config.voiceActivationRetryGapMs,
+        "restoreInputDelayMs": config.restoreInputDelayMs,
+        "voiceShortcutModifiers": config.voiceShortcutModifiers,
         "voiceUIWindowOwnerNames": config.voiceUIWindowOwnerNames,
         "mode": snapshot.mode.rawValue,
         "eventTapReady": snapshot.eventTapReady,
@@ -450,7 +518,6 @@ func writeStatusFile(_ snapshot: RuntimeSnapshot) {
         "syntheticDownPosted": snapshot.syntheticDownPosted,
         "lastEvent": snapshot.lastEvent,
         "lastError": snapshot.lastError ?? NSNull(),
-        "activationAttemptCount": snapshot.activationAttemptCount,
         "lastActivationResult": snapshot.lastActivationResult,
         "lastProbeWindow": snapshot.lastProbeWindow ?? NSNull(),
         "lastProbeWindowOwner": snapshot.lastProbeWindowOwner ?? NSNull(),
