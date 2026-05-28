@@ -6,6 +6,7 @@ A tiny macOS menu bar agent for this workflow:
 - Hold `Command + Option` to temporarily switch to Doubao IME.
 - Replay a clean `Command + Option` hold so Doubao's voice input starts.
 - Release `Command + Option` to end voice input and switch back to WeType.
+- If Doubao IME is already active, leave the shortcut alone.
 
 It is not an IME plugin and does not modify Doubao or WeType. It is a small Swift app that combines the macOS Text Input Source API with a Quartz event tap.
 
@@ -22,6 +23,8 @@ physical Cmd+Option down
   -> wait until macOS confirms the switch
   -> wait a short settle delay
   -> post synthetic Cmd+Option down
+  -> check whether Doubao's bottom voice UI panel appears
+  -> keep synthetic Cmd+Option held and refresh down attempts while physical keys remain held, if needed
   -> wait for physical release
   -> post synthetic Cmd+Option up
   -> switch back to WeType
@@ -36,9 +39,10 @@ The app has no Dock icon. It lives in the macOS menu bar:
 - `豆 REC`, the agent is managing the hold.
 - `豆 ...`, starting or switching.
 
-The menu shows current permissions, current input method, event tap state, restart count, and the latest event. It can also open the relevant macOS privacy settings.
+The menu shows current permissions, current input method, event tap state, voice activation status, restart count, and the latest event. It can also open the relevant macOS privacy settings.
 
 Use `Restart agent` to let launchd restart the agent. Use `Quit agent` to unload the LaunchAgent and stop the menu bar process.
+Use `Run voice probe diagnostics` to observe visible window changes for 3 seconds without sending any shortcut. The log marks whether each new window matches the configured Doubao owner names.
 
 ## Requirements
 
@@ -177,20 +181,36 @@ The agent keeps a persistent config file at:
 ~/Library/Application Support/DoubaoVoiceWeTypeAgent/config.json
 ```
 
-The default voice settle delay is `500` ms:
+The default voice settle delay is `200` ms:
 
 ```json
 {
-  "voiceSettleDelayMs": 500
+  "voiceActivationMaxAttempts": 0,
+  "voiceActivationProbeTimeoutMs": 280,
+  "voiceActivationRetryGapMs": 90,
+  "voiceSettleDelayMs": 200,
+  "voiceUIWindowOwnerNames": [
+    "DoubaoIme",
+    "Doubao",
+    "豆包"
+  ]
 }
 ```
 
-This is the extra wait after macOS reports Doubao as the active input source and before the agent posts synthetic `Command + Option` down. If Doubao switches in but the voice UI does not start, try increasing it, for example `700` or `900`. The value is clamped to `0...5000` ms and is read each time a managed hold starts, so edits apply on the next shortcut attempt.
+`voiceSettleDelayMs` is the extra wait after macOS reports Doubao as the active input source and before the first synthetic `Command + Option` down. The agent then probes Doubao-related windows, but only treats a small visible panel near the bottom of a display as the voice UI. If no voice UI appears, it keeps synthetic `Command + Option` held, waits `voiceActivationRetryGapMs`, and refreshes the synthetic down attempt while the physical shortcut is still held. Once that bottom voice panel is detected, retrying stops. Synthetic up is sent only on physical release, cancellation, or bounded failure.
+
+`voiceActivationMaxAttempts` controls that bound. `0` means no attempt cap: keep retrying until the physical shortcut is released. A positive value stops after that many attempts, posts synthetic up, restores WeType, and logs activation failure.
+
+If Doubao's voice UI uses a different process or window owner name on your machine, run `Run voice probe diagnostics` from the menu and add the observed owner name to `voiceUIWindowOwnerNames`. Diagnostics logs new visible windows with `matchConfiguredOwner=true/false`, `likelyVoicePanel=true/false`, owner, name, and bounds.
 
 You can also override it from LaunchAgent with:
 
 ```text
 VOICE_SETTLE_DELAY_MS=700
+VOICE_ACTIVATION_MAX_ATTEMPTS=0
+VOICE_ACTIVATION_PROBE_TIMEOUT_MS=280
+VOICE_ACTIVATION_RETRY_GAP_MS=90
+VOICE_UI_WINDOW_OWNER_NAMES=DoubaoIme,Doubao,豆包
 ```
 
 ## Diagnostics
@@ -232,5 +252,5 @@ Keeping the app in place is better for update stability.
 ## Caveats
 
 - Rebuilding or replacing the binary can make macOS ask for permissions again.
-- Third-party IMEs may report as selected before their own shortcut monitors are ready. The agent uses a confirmation loop plus a small settle delay, but timing can still be system-dependent.
+- Third-party IMEs may report as selected before their own shortcut monitors are ready. The agent uses a confirmation loop, voice UI window probing, and a hold-driven retry loop, but timing can still be system-dependent.
 - The agent listens only for `flagsChanged` events and the exact `Command + Option` modifier combination.

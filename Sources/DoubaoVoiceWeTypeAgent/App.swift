@@ -13,6 +13,8 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let permissionsMenuItem = NSMenuItem()
     private let inputMenuItem = NSMenuItem()
     private let timingMenuItem = NSMenuItem()
+    private let activationMenuItem = NSMenuItem()
+    private let probeWindowMenuItem = NSMenuItem()
     private let lastEventMenuItem = NSMenuItem()
     private let tapMenuItem = NSMenuItem()
     private var statusTimer: Timer?
@@ -52,7 +54,7 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func addReadOnlyMenuItems() {
-        [statusMenuItem, permissionsMenuItem, inputMenuItem, timingMenuItem, tapMenuItem, lastEventMenuItem].forEach {
+        [statusMenuItem, permissionsMenuItem, inputMenuItem, timingMenuItem, activationMenuItem, probeWindowMenuItem, tapMenuItem, lastEventMenuItem].forEach {
             $0.isEnabled = false
             menu.addItem($0)
         }
@@ -65,6 +67,7 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem(title: "Open Input Monitoring settings", action: #selector(openInputMonitoringSettings), keyEquivalent: "i"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Restore input method", action: #selector(restoreInputNow), keyEquivalent: "w"))
+        menu.addItem(NSMenuItem(title: "Run voice probe diagnostics", action: #selector(runVoiceProbeDiagnostics), keyEquivalent: "d"))
         menu.addItem(NSMenuItem(title: "Open config", action: #selector(openConfig), keyEquivalent: "c"))
         menu.addItem(NSMenuItem(title: "Open log", action: #selector(openLog), keyEquivalent: "l"))
         menu.addItem(NSMenuItem(title: "Restart agent", action: #selector(restartAgent), keyEquivalent: "q"))
@@ -213,7 +216,9 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenuItem.title = "Status: \(snapshot.mode.rawValue)"
         permissionsMenuItem.title = "Permissions: AX \(snapshot.accessibilityOK ? "OK" : "missing") / Input \(snapshot.inputMonitoringOK ? "OK" : "missing")"
         inputMenuItem.title = "Current input: \(displayInputName(snapshot.currentInputID))"
-        timingMenuItem.title = "Voice settle delay: \(config.voiceSettleDelayMs) ms"
+        timingMenuItem.title = "Voice timing: settle \(config.voiceSettleDelayMs) ms / probe \(config.voiceActivationProbeTimeoutMs) ms"
+        activationMenuItem.title = "Activation: \(snapshot.lastActivationResult) / attempts \(snapshot.activationAttemptCount)"
+        probeWindowMenuItem.title = "Probe window: \(snapshot.lastProbeWindow ?? "none")"
         tapMenuItem.title = "Tap: \(snapshot.eventTapReady ? "enabled" : "disabled") / restarts \(snapshot.tapRestartCount)"
         lastEventMenuItem.title = "Last: \(snapshot.lastEvent)"
         writeStatusFile(snapshot)
@@ -288,8 +293,29 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openConfig() {
-        ensureDefaultConfigFile(path: config.configPath, voiceSettleDelayMs: config.defaultVoiceSettleDelayMs)
+        ensureDefaultConfigFile(path: config.configPath, defaults: config.defaultPersistentConfig)
         NSWorkspace.shared.open(URL(fileURLWithPath: config.configPath))
+    }
+
+    @objc private func runVoiceProbeDiagnostics() {
+        mutateRuntime {
+            $0.lastEvent = "voice probe diagnostics running"
+            $0.lastActivationResult = "diagnostics running"
+            $0.lastProbeWindow = nil
+            $0.lastProbeWindowOwner = nil
+            $0.lastProbeWindowName = nil
+            $0.lastProbeWindowBounds = nil
+        }
+        updateStatusUI()
+
+        worker.async { [weak self] in
+            VoiceUIProbe(ownerNames: config.voiceUIWindowOwnerNames).runDiagnostics(durationMs: 3_000)
+            mutateRuntime {
+                $0.lastEvent = "voice probe diagnostics finished"
+                $0.lastActivationResult = "diagnostics finished"
+            }
+            self?.updateStatusUIOnMain()
+        }
     }
 
     @objc private func restartAgent() {

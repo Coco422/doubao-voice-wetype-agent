@@ -12,6 +12,20 @@ struct AgentConfig {
     let logPath: String
     let statusPath: String
     let defaultVoiceSettleDelayMs: UInt32
+    let defaultVoiceActivationMaxAttempts: UInt32
+    let defaultVoiceActivationProbeTimeoutMs: UInt32
+    let defaultVoiceActivationRetryGapMs: UInt32
+    let defaultVoiceUIWindowOwnerNames: [String]
+
+    var defaultPersistentConfig: [String: Any] {
+        [
+            "voiceSettleDelayMs": defaultVoiceSettleDelayMs,
+            "voiceActivationMaxAttempts": defaultVoiceActivationMaxAttempts,
+            "voiceActivationProbeTimeoutMs": defaultVoiceActivationProbeTimeoutMs,
+            "voiceActivationRetryGapMs": defaultVoiceActivationRetryGapMs,
+            "voiceUIWindowOwnerNames": defaultVoiceUIWindowOwnerNames
+        ]
+    }
 
     var voiceSettleDelayMs: UInt32 {
         configuredUInt32(
@@ -23,6 +37,45 @@ struct AgentConfig {
         )
     }
 
+    var voiceActivationMaxAttempts: Int {
+        Int(configuredUInt32(
+            configPath: configPath,
+            fileKey: "voiceActivationMaxAttempts",
+            envKey: "VOICE_ACTIVATION_MAX_ATTEMPTS",
+            defaultValue: defaultVoiceActivationMaxAttempts,
+            range: 0...100
+        ))
+    }
+
+    var voiceActivationProbeTimeoutMs: UInt32 {
+        configuredUInt32(
+            configPath: configPath,
+            fileKey: "voiceActivationProbeTimeoutMs",
+            envKey: "VOICE_ACTIVATION_PROBE_TIMEOUT_MS",
+            defaultValue: defaultVoiceActivationProbeTimeoutMs,
+            range: 50...2_000
+        )
+    }
+
+    var voiceActivationRetryGapMs: UInt32 {
+        configuredUInt32(
+            configPath: configPath,
+            fileKey: "voiceActivationRetryGapMs",
+            envKey: "VOICE_ACTIVATION_RETRY_GAP_MS",
+            defaultValue: defaultVoiceActivationRetryGapMs,
+            range: 0...2_000
+        )
+    }
+
+    var voiceUIWindowOwnerNames: [String] {
+        configuredStringArray(
+            configPath: configPath,
+            fileKey: "voiceUIWindowOwnerNames",
+            envKey: "VOICE_UI_WINDOW_OWNER_NAMES",
+            defaultValue: defaultVoiceUIWindowOwnerNames
+        )
+    }
+
     static let `default`: AgentConfig = {
         let env = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -31,12 +84,19 @@ struct AgentConfig {
         let voiceID = env["VOICE_IME_ID"] ?? "com.bytedance.inputmethod.doubaoime.pinyin"
         let aliasValue = env["VOICE_IME_ALIASES"] ?? "com.bytedance.inputmethod.doubaoime"
         let aliases = Set(aliasValue.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) })
-        let defaultVoiceSettleDelayMs: UInt32 = 500
+        let defaultVoiceSettleDelayMs: UInt32 = 200
+        let defaultMaxAttempts: UInt32 = 0
+        let defaultProbeTimeoutMs: UInt32 = 280
+        let defaultRetryGapMs: UInt32 = 90
+        let defaultOwnerNames = ["DoubaoIme", "Doubao", "豆包"]
 
-        ensureDefaultConfigFile(
-            path: configPath,
-            voiceSettleDelayMs: defaultVoiceSettleDelayMs
-        )
+        ensureDefaultConfigFile(path: configPath, defaults: [
+            "voiceSettleDelayMs": defaultVoiceSettleDelayMs,
+            "voiceActivationMaxAttempts": defaultMaxAttempts,
+            "voiceActivationProbeTimeoutMs": defaultProbeTimeoutMs,
+            "voiceActivationRetryGapMs": defaultRetryGapMs,
+            "voiceUIWindowOwnerNames": defaultOwnerNames
+        ])
 
         return AgentConfig(
             launchdLabel: env["AGENT_LAUNCHD_LABEL"] ?? "com.github.Coco422.doubao-voice-wetype-agent",
@@ -46,7 +106,11 @@ struct AgentConfig {
             configPath: configPath,
             logPath: env["DOUBAO_AGENT_LOG_PATH"] ?? "\(home)/Library/Logs/doubao-voice-wetype-agent.log",
             statusPath: env["DOUBAO_AGENT_STATUS_PATH"] ?? "\(appSupport)/status.json",
-            defaultVoiceSettleDelayMs: defaultVoiceSettleDelayMs
+            defaultVoiceSettleDelayMs: defaultVoiceSettleDelayMs,
+            defaultVoiceActivationMaxAttempts: defaultMaxAttempts,
+            defaultVoiceActivationProbeTimeoutMs: defaultProbeTimeoutMs,
+            defaultVoiceActivationRetryGapMs: defaultRetryGapMs,
+            defaultVoiceUIWindowOwnerNames: defaultOwnerNames
         )
     }()
 }
@@ -76,14 +140,22 @@ struct RuntimeSnapshot {
     let lastEvent: String
     let lastError: String?
     let tapRestartCount: Int
+    let activationAttemptCount: Int
+    let lastActivationResult: String
+    let lastProbeWindow: String?
+    let lastProbeWindowOwner: String?
+    let lastProbeWindowName: String?
+    let lastProbeWindowBounds: String?
 }
 
-func ensureDefaultConfigFile(path: String, voiceSettleDelayMs: UInt32) {
+func ensureDefaultConfigFile(path: String, defaults: [String: Any]) {
     let url = URL(fileURLWithPath: path)
-    guard !FileManager.default.fileExists(atPath: path) else { return }
-    let payload: [String: Any] = [
-        "voiceSettleDelayMs": voiceSettleDelayMs
-    ]
+    var payload = persistentConfig(path: path)
+    let missingKeys = defaults.keys.filter { payload[$0] == nil }
+    guard !FileManager.default.fileExists(atPath: path) || !missingKeys.isEmpty else { return }
+    defaults.forEach { key, value in
+        if payload[key] == nil { payload[key] = value }
+    }
 
     guard JSONSerialization.isValidJSONObject(payload),
           let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
@@ -126,6 +198,36 @@ func configuredUInt32(
     return defaultValue
 }
 
+func configuredStringArray(
+    configPath: String,
+    fileKey: String,
+    envKey: String,
+    defaultValue: [String]
+) -> [String] {
+    if let envValue = ProcessInfo.processInfo.environment[envKey] {
+        return nonEmptyStrings(from: envValue).isEmpty ? defaultValue : nonEmptyStrings(from: envValue)
+    }
+
+    let value = persistentConfig(path: configPath)[fileKey]
+    if let strings = value as? [String] {
+        let cleaned = strings.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return cleaned.isEmpty ? defaultValue : cleaned
+    }
+
+    if let string = value as? String {
+        let cleaned = nonEmptyStrings(from: string)
+        return cleaned.isEmpty ? defaultValue : cleaned
+    }
+
+    return defaultValue
+}
+
+func nonEmptyStrings(from value: String) -> [String] {
+    value.split(separator: ",")
+        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+}
+
 func parseUInt32(_ value: Any?) -> UInt32? {
     if let number = value as? NSNumber {
         let intValue = number.intValue
@@ -148,6 +250,7 @@ final class RuntimeState {
     var mode = AgentMode.starting
     var physicalComboDown = false
     var managingHold = false
+    var passThroughPhysicalCombo = false
     var syntheticDownPosted = false
     var originalInputID: String?
     var eventTapReady = false
@@ -157,6 +260,13 @@ final class RuntimeState {
     var lastEvent = "not triggered yet"
     var lastError: String?
     var tapRestartCount = 0
+    var activationID = 0
+    var activationAttemptCount = 0
+    var lastActivationResult = "not attempted"
+    var lastProbeWindow: String?
+    var lastProbeWindowOwner: String?
+    var lastProbeWindowName: String?
+    var lastProbeWindowBounds: String?
 }
 
 let runtime = RuntimeState()
@@ -213,7 +323,13 @@ func snapshotRuntime() -> RuntimeSnapshot {
             currentInputID: $0.currentInputID,
             lastEvent: $0.lastEvent,
             lastError: $0.lastError,
-            tapRestartCount: $0.tapRestartCount
+            tapRestartCount: $0.tapRestartCount,
+            activationAttemptCount: $0.activationAttemptCount,
+            lastActivationResult: $0.lastActivationResult,
+            lastProbeWindow: $0.lastProbeWindow,
+            lastProbeWindowOwner: $0.lastProbeWindowOwner,
+            lastProbeWindowName: $0.lastProbeWindowName,
+            lastProbeWindowBounds: $0.lastProbeWindowBounds
         )
     }
 }
@@ -292,6 +408,17 @@ func isCmdOptionOnly(_ flags: CGEventFlags) -> Bool {
     return relevantFlags(flags) == [.maskCommand, .maskAlternate]
 }
 
+func modifierFlagDescription(_ flags: CGEventFlags) -> String {
+    var names: [String] = []
+    if flags.contains(.maskCommand) { names.append("cmd") }
+    if flags.contains(.maskAlternate) { names.append("option") }
+    if flags.contains(.maskControl) { names.append("control") }
+    if flags.contains(.maskShift) { names.append("shift") }
+    if flags.contains(.maskSecondaryFn) { names.append("fn") }
+    if names.isEmpty { names.append("none") }
+    return "\(names.joined(separator: "+")) raw=\(flags.rawValue)"
+}
+
 func isVoiceInput(_ id: String) -> Bool {
     return config.voiceInputAliases.contains(id)
 }
@@ -308,6 +435,10 @@ func writeStatusFile(_ snapshot: RuntimeSnapshot) {
         "pid": ProcessInfo.processInfo.processIdentifier,
         "configPath": config.configPath,
         "voiceSettleDelayMs": config.voiceSettleDelayMs,
+        "voiceActivationMaxAttempts": config.voiceActivationMaxAttempts,
+        "voiceActivationProbeTimeoutMs": config.voiceActivationProbeTimeoutMs,
+        "voiceActivationRetryGapMs": config.voiceActivationRetryGapMs,
+        "voiceUIWindowOwnerNames": config.voiceUIWindowOwnerNames,
         "mode": snapshot.mode.rawValue,
         "eventTapReady": snapshot.eventTapReady,
         "accessibilityOK": snapshot.accessibilityOK,
@@ -319,6 +450,12 @@ func writeStatusFile(_ snapshot: RuntimeSnapshot) {
         "syntheticDownPosted": snapshot.syntheticDownPosted,
         "lastEvent": snapshot.lastEvent,
         "lastError": snapshot.lastError ?? NSNull(),
+        "activationAttemptCount": snapshot.activationAttemptCount,
+        "lastActivationResult": snapshot.lastActivationResult,
+        "lastProbeWindow": snapshot.lastProbeWindow ?? NSNull(),
+        "lastProbeWindowOwner": snapshot.lastProbeWindowOwner ?? NSNull(),
+        "lastProbeWindowName": snapshot.lastProbeWindowName ?? NSNull(),
+        "lastProbeWindowBounds": snapshot.lastProbeWindowBounds ?? NSNull(),
         "tapRestartCount": snapshot.tapRestartCount
     ]
 

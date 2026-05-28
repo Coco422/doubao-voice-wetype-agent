@@ -32,7 +32,7 @@ launchctl kickstart -k gui/$(id -u)/com.github.Coco422.doubao-voice-wetype-agent
 
 ## Voice input does not start, but the IME switches
 
-This is usually timing-related. The IME may report as selected before its shortcut monitor is ready. The current implementation waits for the selected input source and then adds a settle delay before posting synthetic `Command + Option` down.
+This is usually timing-related. The IME may report as selected before its shortcut monitor is ready. The agent waits for the selected input source, adds a small settle delay, posts synthetic `Command + Option` down, and then checks whether Doubao's small bottom voice UI panel appears. If no voice UI appears, it keeps synthetic `Command + Option` held and refreshes down attempts while the physical shortcut is still held. Once that bottom voice panel appears, retrying stops.
 
 Open the menu bar item and check `Voice settle delay`. You can edit the persistent config:
 
@@ -40,15 +40,25 @@ Open the menu bar item and check `Voice settle delay`. You can edit the persiste
 open "$HOME/Library/Application Support/DoubaoVoiceWeTypeAgent/config.json"
 ```
 
-Increase `voiceSettleDelayMs` if Doubao switches in but voice input does not appear:
+The default timing config is:
 
 ```json
 {
-  "voiceSettleDelayMs": 700
+  "voiceActivationMaxAttempts": 0,
+  "voiceActivationProbeTimeoutMs": 280,
+  "voiceActivationRetryGapMs": 90,
+  "voiceSettleDelayMs": 200,
+  "voiceUIWindowOwnerNames": [
+    "DoubaoIme",
+    "Doubao",
+    "豆包"
+  ]
 }
 ```
 
-The value is milliseconds, clamped to `0...5000`, and applies on the next shortcut attempt.
+If Doubao switches in but voice input does not appear, first check whether the log says `voice UI detected`. If it never detects a window, run `Run voice probe diagnostics` from the menu while manually opening Doubao voice input, then add the observed owner name to `voiceUIWindowOwnerNames`. Diagnostics logs each new visible window with `matchConfiguredOwner=true/false`, `likelyVoicePanel=true/false`, owner, name, and bounds so an unknown Doubao process can still be discovered.
+
+`voiceActivationMaxAttempts=0` means retry until you release the physical shortcut. Use a positive value only if you want bounded failure behavior.
 
 Check the log:
 
@@ -60,13 +70,14 @@ Look for:
 
 ```text
 physical cmd+option down
-posted cmd+option down
+activation 1 attempt 1 start
+voice UI detected
 physical cmd+option released
 posted cmd+option up
 restored input
 ```
 
-If `posted cmd+option down` appears but the voice UI does not start, the IME did not react to the synthetic hold. Try a longer `voiceSettleDelayMs`.
+If repeated attempts log `no voice UI detected`, the IME did not react to the synthetic hold or the probe is not matching the right window owner. Tune `voiceUIWindowOwnerNames` before increasing settle delay.
 
 ## The current input source ID is unknown
 
