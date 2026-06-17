@@ -319,9 +319,9 @@ extension AgentApp {
                 return
             }
 
-            // Clean re-trigger: release, wait a gap, then the loop posts down again.
-            postVoiceShortcutUp()
-            mutateRuntime { $0.syntheticDownPosted = false }
+            // Re-trigger without posting up: the IME may still be starting and an up
+            // event would kill it. Just wait a gap and post down again — the IME
+            // interprets repeated downs as the user pressing the shortcut again, harmless.
             log("activation \(activationID) attempt \(attempt) no readiness; re-triggering")
             guard sleepWhileHoldActive(activationID: activationID, milliseconds: config.voiceRetryGapMs) else {
                 cancelActivationBeforeReady(activationID: activationID)

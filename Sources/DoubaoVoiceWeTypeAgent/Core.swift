@@ -134,8 +134,8 @@ struct AgentConfig {
         let defaultVoiceShortcutModifiers = ["cmd", "option"]
         let defaultOwnerNames = ["DoubaoIme", "Doubao", "豆包"]
         let defaultTriggerKey = "rightCommand"
-        let defaultVoiceVerifyTimeoutMs: UInt32 = 700
-        let defaultVoiceRetryGapMs: UInt32 = 90
+        let defaultVoiceVerifyTimeoutMs: UInt32 = 1500
+        let defaultVoiceRetryGapMs: UInt32 = 150
         let defaultVoiceMaxRetries: UInt32 = 1
         let defaultVoiceReadinessSignal = "microphone"
 
