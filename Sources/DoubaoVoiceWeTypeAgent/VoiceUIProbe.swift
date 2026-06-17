@@ -62,6 +62,30 @@ final class VoiceUIProbe {
         return nil
     }
 
+    // Owner-only readiness signal used by the activation closed loop: return the
+    // first newly-appeared window owned by a configured Doubao owner name,
+    // WITHOUT any geometry/position heuristic. This is deliberately independent of
+    // resolution, scaling, Dock, and which display is active, so it works across
+    // multi-monitor setups where geometry-based detection fails.
+    func waitForNewOwnedWindow(
+        baseline: [VoiceUIWindow],
+        timeoutMs: UInt32,
+        pollMs: UInt32 = 30,
+        shouldContinue: () -> Bool = { true }
+    ) -> VoiceUIWindow? {
+        let baselineSignatures = Set(baseline.map(\.signature))
+        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
+
+        while Date() < deadline && shouldContinue() {
+            if let window = snapshot().first(where: { !baselineSignatures.contains($0.signature) }) {
+                return window
+            }
+            usleep(pollMs * 1000)
+        }
+
+        return nil
+    }
+
     func runDiagnostics(durationMs: UInt32) {
         let baseline = visibleWindows(requireOwnerMatch: false)
         let baselineSignatures = Set(baseline.map(\.signature))

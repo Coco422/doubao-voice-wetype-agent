@@ -25,39 +25,49 @@ The installer command and the app's first-launch self-install path both write th
 ```text
 ready
  |
- | physical configured shortcut down
+ | trigger key down (by key code, default Right ⌘)
  v
-check current input source
- |
- |-- already voice IME --> pass through original event
+capture current input source (remember it for restore)
  |
 switching
  |
- | worker uses captured source
- | select voice IME if needed
+ | worker: select voice IME if not already active
  | wait for current input source to match
- | wait trigger delay
- | post configured Doubao voice shortcut down
+ | wait settle delay
  v
-holding
-
+activation loop
+ |
+ | post Doubao voice shortcut down (private event source)
+ | verify readiness: microphone running, or new Doubao-owned window
+ |-- detected --------------------------------> holding
+ |-- not detected, retries left: post up, gap, post down again
+ |-- not detected, no retries: hold anyway (best effort) --> holding
+ v
 holding
  |
- | physical configured shortcut release
+ | trigger key release
  v
-post configured Doubao voice shortcut up
+post Doubao voice shortcut up
  |
  | wait restore delay
- | select restore IME
+ | select the input source we started from
+ |   (skip if the user was already on Doubao)
  v
 ready
 ```
 
-## Why Replay Events
 
-Doubao voice input is triggered by a user-configured hold-style shortcut. If the user presses that shortcut while another IME is active, then Doubao may not observe the key-down transition after the app switches IMEs. The agent suppresses the original modifier transition, switches to Doubao, waits for a configurable trigger delay, then posts the configured Doubao voice shortcut down so Doubao can observe the hold from the start.
+## Why Decouple And Verify
 
-The release side posts the same configured shortcut up, waits before restoring the previous IME, then switches back. The main activation path does not probe UI windows or retry. Window probing remains as a diagnostics menu item only.
+Doubao voice input is a hold-to-talk shortcut that only works while Doubao is the active IME. A naive "switch then press the shortcut" is unreliable for two reasons:
+
+1. **Readiness race.** After macOS reports the IME switch, Doubao's own voice hotkey listener (in the Doubao IME process) is not necessarily live yet, so a shortcut posted on a fixed delay can be dropped.
+2. **Modifier collision.** If the key the user holds is the same as the shortcut being replayed, the synthetic key-down is not a fresh edge — the modifier flag is already set by the physically-held key — so Doubao may never see a new press.
+
+The agent addresses both. The **trigger key is decoupled** from the replayed shortcut and detected by key code, so the replayed `Command+Option` is a clean edge and ordinary `⌘`-shortcuts are never mistaken for the trigger. Synthetic events come from a private `CGEventSource` so their modifier state does not merge with held hardware keys. Instead of a fixed delay, activation runs a **closed loop**: post the shortcut down, confirm voice actually started via a screen-independent readiness signal (microphone running, or a new Doubao-owned window), and if it did not start, do one clean re-trigger (release then press). The geometry-based window heuristic is kept for diagnostics only; it is not used to gate activation because window position/size is not reliable across displays and scaling.
+
+The release side posts the same shortcut up, waits, then restores the input source the user started from (skipped if they were already on Doubao).
+
 
 ## Event Tap Hygiene
 
@@ -77,11 +87,12 @@ IME and path configuration is read from environment variables, usually supplied 
 | `RESTORE_IME_ID` | `com.tencent.inputmethod.wetype.pinyin` |
 | `VOICE_IME_ID` | `com.bytedance.inputmethod.doubaoime.pinyin` |
 | `VOICE_IME_ALIASES` | `com.bytedance.inputmethod.doubaoime` |
+| `TRIGGER_KEY` | `rightCommand` |
 | `DOUBAO_AGENT_CONFIG_PATH` | `~/Library/Application Support/DoubaoVoiceWeTypeAgent/config.json` |
 | `DOUBAO_AGENT_LOG_PATH` | `~/Library/Logs/doubao-voice-wetype-agent.log` |
 | `DOUBAO_AGENT_STATUS_PATH` | `~/Library/Application Support/DoubaoVoiceWeTypeAgent/status.json` |
 
-Timing configuration is persisted in `config.json`:
+Timing and behavior are persisted in `config.json`:
 
 ```json
 {
@@ -95,11 +106,16 @@ Timing configuration is persisted in `config.json`:
     "DoubaoIme",
     "Doubao",
     "豆包"
-  ]
+  ],
+  "triggerKey": "rightCommand",
+  "voiceReadinessSignal": "microphone",
+  "voiceVerifyTimeoutMs": 700,
+  "voiceRetryGapMs": 90,
+  "voiceMaxRetries": 1
 }
 ```
 
-`voiceSettleDelayMs` is the delay after macOS confirms the voice IME is selected and before the configured Doubao voice shortcut is posted down. `voiceShortcutModifiers` is the modifier-only shortcut the agent listens for and replays; it must match the hold-to-talk shortcut configured inside Doubao. By default it is `cmd,option`; supported names are `cmd`, `option`, `control`, and `shift`. `restoreInputDelayMs` is the delay after the physical release before restoring WeType. The diagnostics menu item observes new visible windows and logs whether they match configured Doubao owner names; it does not participate in normal activation. Timing values can be overridden with `VOICE_SETTLE_DELAY_MS`, `RESTORE_INPUT_DELAY_MS`, `VOICE_SHORTCUT_MODIFIERS`, and `VOICE_UI_WINDOW_OWNER_NAMES`.
+`triggerKey` is the key the user holds, detected by key code (whitelist: `rightCommand`, `leftCommand`, `rightOption`, `leftOption`, `rightControl`, `leftControl`, `rightShift`, `leftShift`, `fn`); it is decoupled from `voiceShortcutModifiers`, the shortcut replayed to Doubao (`cmd`/`option`/`control`/`shift`). `voiceSettleDelayMs` is the wait after the IME switch confirms and before the first shortcut down. `voiceReadinessSignal` selects how activation confirms voice started: `microphone` (default; default-input device running — screen-independent, no permission prompt; auto-falls back to `window` if the mic was already running), `window` (a new Doubao-owned window, ignoring geometry), or `none`. `voiceVerifyTimeoutMs` bounds the wait for that signal; on miss the loop does up to `voiceMaxRetries` clean re-triggers separated by `voiceRetryGapMs`. `restoreInputDelayMs` is the delay after release before restoring the original input source. The geometry-based window probe is diagnostics-only. Overrides: `TRIGGER_KEY`, `VOICE_READINESS_SIGNAL`, `VOICE_VERIFY_TIMEOUT_MS`, `VOICE_RETRY_GAP_MS`, `VOICE_MAX_RETRIES`, `VOICE_SETTLE_DELAY_MS`, `RESTORE_INPUT_DELAY_MS`, `VOICE_SHORTCUT_MODIFIERS`, `VOICE_UI_WINDOW_OWNER_NAMES`.
 
 ## Files
 
@@ -109,6 +125,7 @@ Sources/DoubaoVoiceWeTypeAgent/App.swift
 Sources/DoubaoVoiceWeTypeAgent/Events.swift
 Sources/DoubaoVoiceWeTypeAgent/Installer.swift
 Sources/DoubaoVoiceWeTypeAgent/VoiceUIProbe.swift
+Sources/DoubaoVoiceWeTypeAgent/MicMonitor.swift
 Sources/DoubaoVoiceWeTypeAgent/main.swift
 Sources/DoubaoVoiceWeTypeAgent/Resources/AppIcon.icns
 Sources/IMSwitch/main.swift

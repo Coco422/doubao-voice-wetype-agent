@@ -12,16 +12,27 @@ extension AgentApp {
             return Unmanaged.passUnretained(event)
         }
 
-        let comboDown = isVoiceShortcutOnly(event.flags)
-        if comboDown {
-            return handleComboDownEvent(event)
-        }
-
-        if readRuntime({ $0.physicalComboDown }) {
+        let keycode = event.getIntegerValueField(.keyboardEventKeycode)
+        if isTriggerKeycode(keycode) {
+            // The trigger key's keycode filters out ordinary ⌘-shortcuts (e.g. ⌘C
+            // uses the *left* ⌘, keycode 55, not the right ⌘, keycode 54). For the
+            // matching keycode, the presence of the modifier flag in event.flags
+            // tells us whether this flagsChanged is a press (flag set) or release
+            // (flag cleared). It is safe to read the flag here because we already
+            // know the exact keycode.
+            let spec = cachedTriggerKeySpec()
+            let isDown = event.flags.contains(spec.flag)
+            if isDown {
+                mutateRuntime { $0.physicalComboDown = true }
+                return handlePhysicalComboDown(event)
+            }
             mutateRuntime { $0.physicalComboDown = false }
             return handlePhysicalComboUp(event)
         }
 
+        // Any other modifier change: swallow while we are managing a hold so the
+        // user's stray modifiers do not leak to the foreground app; otherwise
+        // pass it through untouched.
         return readRuntime({ $0.managingHold }) ? nil : Unmanaged.passUnretained(event)
     }
 
@@ -32,27 +43,11 @@ extension AgentApp {
         }
     }
 
-    private func handleComboDownEvent(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        let shouldStart = readRuntime { !$0.physicalComboDown }
-        if shouldStart {
-            mutateRuntime { $0.physicalComboDown = true }
-            return handlePhysicalComboDown(event)
-        }
-
-        if readRuntime({ $0.managingHold }) {
-            return nil
-        }
-        return Unmanaged.passUnretained(event)
-    }
-
     private func handlePhysicalComboDown(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         let current = currentInputID() ?? "unknown"
-        if isVoiceInput(current) {
-            passThroughAlreadyVoiceInput(current: current)
-            return Unmanaged.passUnretained(event)
-        }
+        let alreadyVoice = isVoiceInput(current)
 
-        let activationID = startManagedHold()
+        let activationID = startManagedHold(wasAlreadyVoice: alreadyVoice)
         mutateRuntime {
             $0.currentInputID = current
             $0.originalInputID = current
@@ -60,25 +55,12 @@ extension AgentApp {
         worker.async { [weak self] in
             self?.beginManagedHold(activationID: activationID, initialInputID: current)
         }
+        // Suppress the physical trigger key: it is decoupled from the voice
+        // shortcut, so the foreground app never needs to see it.
         return nil
     }
 
-    private func passThroughAlreadyVoiceInput(current: String) {
-        mutateRuntime {
-            $0.mode = .ready
-            $0.managingHold = false
-            $0.passThroughPhysicalCombo = true
-            $0.syntheticDownPosted = false
-            $0.currentInputID = current
-            $0.originalInputID = current
-            $0.lastEvent = "already voice input; pass through"
-            $0.lastError = nil
-        }
-        updateStatusUI()
-        log("already voice input; pass through current=\(current)")
-    }
-
-    private func startManagedHold() -> Int {
+    private func startManagedHold(wasAlreadyVoice: Bool) -> Int {
         var activationID = 0
         mutateRuntime {
             $0.activationID += 1
@@ -87,37 +69,30 @@ extension AgentApp {
             $0.managingHold = true
             $0.passThroughPhysicalCombo = false
             $0.syntheticDownPosted = false
+            $0.wasAlreadyVoice = wasAlreadyVoice
             $0.lastActivationResult = "starting"
             $0.lastProbeWindow = nil
             $0.lastProbeWindowOwner = nil
             $0.lastProbeWindowName = nil
             $0.lastProbeWindowBounds = nil
-            $0.lastEvent = "\(voiceShortcutDescription()) down"
+            $0.lastEvent = "\(triggerKeyDescription()) down"
             $0.lastError = nil
         }
         updateStatusUI()
-        log("physical voice shortcut down modifiers=\(voiceShortcutDescription()); activationID=\(activationID)")
+        log("trigger down (\(triggerKeyDescription())); wasAlreadyVoice=\(wasAlreadyVoice); replay=\(voiceShortcutDescription()); activationID=\(activationID)")
         return activationID
     }
 
     private func handlePhysicalComboUp(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         var managing = false
-        var passThrough = false
         var activationID = 0
-        let flags = modifierFlagDescription(event.flags)
         mutateRuntime {
             managing = $0.managingHold
-            passThrough = $0.passThroughPhysicalCombo
             activationID = $0.activationID
             $0.passThroughPhysicalCombo = false
-            $0.lastEvent = "\(voiceShortcutDescription()) released, flags=\(flags), managed=\(managing)"
+            $0.lastEvent = "\(triggerKeyDescription()) released, managed=\(managing)"
         }
-        log("physical voice shortcut released; flags=\(flags), managing=\(managing), activationID=\(activationID)")
-
-        if passThrough {
-            log("already voice input passthrough release")
-            return Unmanaged.passUnretained(event)
-        }
+        log("trigger released (\(triggerKeyDescription())); managing=\(managing), activationID=\(activationID)")
 
         if managing {
             worker.async { [weak self] in
@@ -156,7 +131,7 @@ extension AgentApp {
             return
         }
 
-        triggerVoiceStart(activationID: activationID)
+        runVoiceActivation(activationID: activationID)
     }
 
     private func failAndRestoreManagedHold(activationID: Int, event: String, error: String) {
@@ -194,28 +169,52 @@ extension AgentApp {
             log("release before voice shortcut down; skip shortcut up")
         }
 
+        if readRuntime({ $0.wasAlreadyVoice }) {
+            // The user was already on the voice IME before holding the trigger;
+            // leave them on it instead of forcing a switch to the restore IME.
+            markHoldFinishedWithoutRestore()
+            log("activation \(activationID) finished; stayed on voice input (was already active)")
+            updateStatusUIOnMain()
+            return
+        }
+
         usleep(config.restoreInputDelayMs * 1000)
         restoreAfterManagedHold()
         updateStatusUIOnMain()
     }
 
-    private func restoreAfterManagedHold(event: String = "restored input method", error: String? = nil) {
-        if selectAndSettleInput(config.restoreInputID, settleMs: 60) {
-            markRestoreResult(mode: .ready, event: event, error: error)
-            log("restored input")
-        } else {
-            markRestoreResult(mode: .error, event: "failed to restore input method", error: "cannot switch back to restore input")
-            log("failed to restore input")
+    private func markHoldFinishedWithoutRestore() {
+        mutateRuntime {
+            $0.mode = .ready
+            $0.managingHold = false
+            $0.passThroughPhysicalCombo = false
+            $0.syntheticDownPosted = false
+            $0.currentInputID = currentInputID() ?? config.voiceInputID
+            $0.lastEvent = "voice hold finished; stayed on voice input"
+            $0.lastError = nil
         }
     }
 
-    private func markRestoreResult(mode: AgentMode, event: String, error: String?) {
+    private func restoreAfterManagedHold(event: String = "restored input method", error: String? = nil) {
+        // Restore to whatever the user was on before the hold, not a hardcoded IME.
+        let captured = readRuntime { $0.originalInputID } ?? config.restoreInputID
+        let target = isVoiceInput(captured) ? config.restoreInputID : captured
+        if selectAndSettleInput(target, settleMs: 60) {
+            markRestoreResult(mode: .ready, target: target, event: event, error: error)
+            log("restored input to \(displayInputName(target))")
+        } else {
+            markRestoreResult(mode: .error, target: target, event: "failed to restore input method", error: "cannot switch back to restore input")
+            log("failed to restore input to \(displayInputName(target))")
+        }
+    }
+
+    private func markRestoreResult(mode: AgentMode, target: String, event: String, error: String?) {
         mutateRuntime {
             $0.mode = mode
             $0.managingHold = false
             $0.passThroughPhysicalCombo = false
             $0.syntheticDownPosted = false
-            $0.currentInputID = mode == .ready ? config.restoreInputID : (currentInputID() ?? "unknown")
+            $0.currentInputID = mode == .ready ? target : (currentInputID() ?? "unknown")
             $0.lastEvent = event
             $0.lastError = error
         }
@@ -225,7 +224,7 @@ extension AgentApp {
         mutateRuntime {
             $0.currentInputID = current
             $0.originalInputID = current
-            $0.lastEvent = "\(voiceShortcutDescription()) down, current=\(displayInputName(current))"
+            $0.lastEvent = "\(triggerKeyDescription()) down, current=\(displayInputName(current))"
         }
         log("activation \(activationID) current input=\(current)")
     }
@@ -238,27 +237,111 @@ extension AgentApp {
         return selectAndSettleInput(config.voiceInputID, settleMs: 0)
     }
 
-    private func triggerVoiceStart(activationID: Int) {
-        guard isHoldActive(activationID) else {
-            cancelActivationBeforeReady(activationID: activationID)
-            return
+    // Closed-loop activation: post the replayed voice shortcut down, then confirm
+    // voice actually started using a screen-independent readiness signal
+    // (microphone running, or a new Doubao-owned window as fallback). If it did
+    // not start in time, do a CLEAN re-trigger (up then down) so the next press is
+    // a real edge, bounded by voiceMaxRetries. This replaces the old fixed-delay
+    // fire-and-hope and the abandoned geometry-based probe.
+    private func runVoiceActivation(activationID: Int) {
+        let signal = config.voiceReadinessSignal.lowercased()
+        let probe = VoiceUIProbe(ownerNames: config.voiceUIWindowOwnerNames)
+        let windowBaseline = probe.snapshot()
+        let micBaselineRunning = MicMonitor.isInputRunningSomewhere()
+
+        // Microphone is the preferred signal, but it is useless if the mic was
+        // already running before we triggered (e.g. the user is in a call), so in
+        // that case fall back to a new Doubao-owned window. "none" disables
+        // verification entirely (fire-and-hold).
+        let useMic = signal == "microphone" && !micBaselineRunning
+        let useWindow = signal == "window" || (signal == "microphone" && micBaselineRunning)
+        if micBaselineRunning && signal == "microphone" {
+            log("activation \(activationID) mic already running at baseline; using window fallback")
         }
 
-        postVoiceShortcutDown()
+        let maxAttempts = Int(config.voiceMaxRetries) + 1
+        var attempt = 1
+        while true {
+            guard isHoldActive(activationID) else {
+                cancelActivationBeforeReady(activationID: activationID)
+                return
+            }
+
+            postVoiceShortcutDown()
+            mutateRuntime {
+                $0.mode = .holding
+                $0.syntheticDownPosted = true
+                $0.currentInputID = config.voiceInputID
+                $0.lastEvent = "voice shortcut down posted (attempt \(attempt))"
+                $0.lastActivationResult = "attempt \(attempt) posted; verifying"
+                $0.lastError = nil
+            }
+            log("activation \(activationID) voice shortcut down posted attempt=\(attempt) signal=\(signal)")
+            updateStatusUIOnMain()
+
+            if !useMic && !useWindow {
+                markVoiceHolding(activationID: activationID, detail: "no verify signal; assumed started")
+                return
+            }
+
+            let detected: Bool
+            if useMic {
+                detected = MicMonitor.waitForInputRunning(
+                    timeoutMs: config.voiceVerifyTimeoutMs,
+                    shouldContinue: { self.isHoldActive(activationID) }
+                )
+            } else {
+                detected = probe.waitForNewOwnedWindow(
+                    baseline: windowBaseline,
+                    timeoutMs: config.voiceVerifyTimeoutMs,
+                    shouldContinue: { self.isHoldActive(activationID) }
+                ) != nil
+            }
+
+            if detected {
+                markVoiceHolding(activationID: activationID, detail: "\(useMic ? "mic" : "window") detected on attempt \(attempt)")
+                return
+            }
+
+            guard isHoldActive(activationID) else {
+                cancelActivationBeforeReady(activationID: activationID)
+                return
+            }
+
+            if attempt >= maxAttempts {
+                // Best effort: keep the shortcut held so a late start still works.
+                mutateRuntime {
+                    $0.lastActivationResult = "verify failed after \(attempt) attempt(s); holding anyway"
+                    $0.lastError = "voice readiness not detected"
+                }
+                log("activation \(activationID) verify failed after \(attempt) attempt(s); holding anyway")
+                updateStatusUIOnMain()
+                return
+            }
+
+            // Clean re-trigger: release, wait a gap, then the loop posts down again.
+            postVoiceShortcutUp()
+            mutateRuntime { $0.syntheticDownPosted = false }
+            log("activation \(activationID) attempt \(attempt) no readiness; re-triggering")
+            guard sleepWhileHoldActive(activationID: activationID, milliseconds: config.voiceRetryGapMs) else {
+                cancelActivationBeforeReady(activationID: activationID)
+                return
+            }
+            attempt += 1
+        }
+    }
+
+    private func markVoiceHolding(activationID: Int, detail: String) {
         mutateRuntime {
             $0.mode = .holding
             $0.syntheticDownPosted = true
             $0.currentInputID = config.voiceInputID
-            $0.lastEvent = "voice shortcut down posted"
-            $0.lastActivationResult = "voice shortcut down posted"
+            $0.lastEvent = "voice started: \(detail)"
+            $0.lastActivationResult = detail
             $0.lastError = nil
         }
-        log("activation \(activationID) voice shortcut down posted")
+        log("activation \(activationID) voice started: \(detail)")
         updateStatusUIOnMain()
-    }
-
-    private func markActivationReleasedBeforeReady(activationID: Int) {
-        cancelActivationBeforeReady(activationID: activationID)
     }
 
     private func cancelActivationBeforeReady(activationID: Int) {

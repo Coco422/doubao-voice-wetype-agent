@@ -7,8 +7,9 @@ This repository contains a small macOS Swift menu bar agent. Keep changes scoped
 - Do not hardcode a local user path. Use `$HOME`, `FileManager.default.homeDirectoryForCurrentUser`, or LaunchAgent environment variables.
 - Keep the agent usable without Xcode. SwiftPM and the system Swift toolchain should be enough.
 - Preserve the default Doubao voice IME and WeType restore IME IDs unless a change explicitly makes them configurable.
-- Treat `voiceShortcutModifiers` as the configured modifier-only shortcut to both listen for and replay. Do not hardcode `Command + Option` except as the default value.
-- Keep Doubao window probing diagnostic-only. The normal activation path should switch IME, wait the trigger delay, post the configured shortcut down, hold until physical release, then post up and restore.
+- Keep the physical `triggerKey` (the key the user holds, detected by key code) decoupled from `voiceShortcutModifiers` (the shortcut replayed to Doubao). Do not hardcode `rightCommand` or `Command + Option` except as default values.
+- Keep Doubao window-geometry probing diagnostic-only. The normal activation path should switch IME (skip if already on it), post the replayed shortcut down from a private event source, verify voice started via a screen-independent signal (microphone running, or a new Doubao-owned window) with a bounded clean re-trigger, hold until the trigger key is released, then post up and restore the input source the user started from.
+- Reading microphone device state (`kAudioDevicePropertyDeviceIsRunningSomewhere`) is inspection only; do not add audio capture or request the Microphone permission.
 - Avoid long blocking work inside the CGEvent tap callback. Schedule slow work on the serial worker queue.
 - Keep user-facing troubleshooting in `README.md` and `docs/TROUBLESHOOTING.md`.
 

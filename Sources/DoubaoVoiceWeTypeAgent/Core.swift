@@ -15,13 +15,23 @@ struct AgentConfig {
     let defaultRestoreInputDelayMs: UInt32
     let defaultVoiceShortcutModifiers: [String]
     let defaultVoiceUIWindowOwnerNames: [String]
+    let defaultTriggerKey: String
+    let defaultVoiceVerifyTimeoutMs: UInt32
+    let defaultVoiceRetryGapMs: UInt32
+    let defaultVoiceMaxRetries: UInt32
+    let defaultVoiceReadinessSignal: String
 
     var defaultPersistentConfig: [String: Any] {
         [
             "voiceSettleDelayMs": defaultVoiceSettleDelayMs,
             "restoreInputDelayMs": defaultRestoreInputDelayMs,
             "voiceShortcutModifiers": defaultVoiceShortcutModifiers,
-            "voiceUIWindowOwnerNames": defaultVoiceUIWindowOwnerNames
+            "voiceUIWindowOwnerNames": defaultVoiceUIWindowOwnerNames,
+            "triggerKey": defaultTriggerKey,
+            "voiceVerifyTimeoutMs": defaultVoiceVerifyTimeoutMs,
+            "voiceRetryGapMs": defaultVoiceRetryGapMs,
+            "voiceMaxRetries": defaultVoiceMaxRetries,
+            "voiceReadinessSignal": defaultVoiceReadinessSignal
         ]
     }
 
@@ -63,6 +73,54 @@ struct AgentConfig {
         )
     }
 
+    var triggerKey: String {
+        configuredString(
+            configPath: configPath,
+            fileKey: "triggerKey",
+            envKey: "TRIGGER_KEY",
+            defaultValue: defaultTriggerKey
+        )
+    }
+
+    var voiceVerifyTimeoutMs: UInt32 {
+        configuredUInt32(
+            configPath: configPath,
+            fileKey: "voiceVerifyTimeoutMs",
+            envKey: "VOICE_VERIFY_TIMEOUT_MS",
+            defaultValue: defaultVoiceVerifyTimeoutMs,
+            range: 0...5_000
+        )
+    }
+
+    var voiceRetryGapMs: UInt32 {
+        configuredUInt32(
+            configPath: configPath,
+            fileKey: "voiceRetryGapMs",
+            envKey: "VOICE_RETRY_GAP_MS",
+            defaultValue: defaultVoiceRetryGapMs,
+            range: 0...2_000
+        )
+    }
+
+    var voiceMaxRetries: UInt32 {
+        configuredUInt32(
+            configPath: configPath,
+            fileKey: "voiceMaxRetries",
+            envKey: "VOICE_MAX_RETRIES",
+            defaultValue: defaultVoiceMaxRetries,
+            range: 0...5
+        )
+    }
+
+    var voiceReadinessSignal: String {
+        configuredString(
+            configPath: configPath,
+            fileKey: "voiceReadinessSignal",
+            envKey: "VOICE_READINESS_SIGNAL",
+            defaultValue: defaultVoiceReadinessSignal
+        )
+    }
+
     static let `default`: AgentConfig = {
         let env = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -75,12 +133,22 @@ struct AgentConfig {
         let defaultRestoreDelayMs: UInt32 = 2_000
         let defaultVoiceShortcutModifiers = ["cmd", "option"]
         let defaultOwnerNames = ["DoubaoIme", "Doubao", "豆包"]
+        let defaultTriggerKey = "rightCommand"
+        let defaultVoiceVerifyTimeoutMs: UInt32 = 700
+        let defaultVoiceRetryGapMs: UInt32 = 90
+        let defaultVoiceMaxRetries: UInt32 = 1
+        let defaultVoiceReadinessSignal = "microphone"
 
         ensureDefaultConfigFile(path: configPath, defaults: [
             "voiceSettleDelayMs": defaultVoiceSettleDelayMs,
             "restoreInputDelayMs": defaultRestoreDelayMs,
             "voiceShortcutModifiers": defaultVoiceShortcutModifiers,
-            "voiceUIWindowOwnerNames": defaultOwnerNames
+            "voiceUIWindowOwnerNames": defaultOwnerNames,
+            "triggerKey": defaultTriggerKey,
+            "voiceVerifyTimeoutMs": defaultVoiceVerifyTimeoutMs,
+            "voiceRetryGapMs": defaultVoiceRetryGapMs,
+            "voiceMaxRetries": defaultVoiceMaxRetries,
+            "voiceReadinessSignal": defaultVoiceReadinessSignal
         ])
 
         return AgentConfig(
@@ -94,7 +162,12 @@ struct AgentConfig {
             defaultVoiceSettleDelayMs: defaultVoiceSettleDelayMs,
             defaultRestoreInputDelayMs: defaultRestoreDelayMs,
             defaultVoiceShortcutModifiers: defaultVoiceShortcutModifiers,
-            defaultVoiceUIWindowOwnerNames: defaultOwnerNames
+            defaultVoiceUIWindowOwnerNames: defaultOwnerNames,
+            defaultTriggerKey: defaultTriggerKey,
+            defaultVoiceVerifyTimeoutMs: defaultVoiceVerifyTimeoutMs,
+            defaultVoiceRetryGapMs: defaultVoiceRetryGapMs,
+            defaultVoiceMaxRetries: defaultVoiceMaxRetries,
+            defaultVoiceReadinessSignal: defaultVoiceReadinessSignal
         )
     }()
 }
@@ -181,6 +254,25 @@ func configuredUInt32(
     return defaultValue
 }
 
+func configuredString(
+    configPath: String,
+    fileKey: String,
+    envKey: String,
+    defaultValue: String
+) -> String {
+    if let envValue = ProcessInfo.processInfo.environment[envKey] {
+        let trimmed = envValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+    }
+
+    if let value = persistentConfig(path: configPath)[fileKey] as? String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+    }
+
+    return defaultValue
+}
+
 func configuredStringArray(
     configPath: String,
     fileKey: String,
@@ -236,6 +328,7 @@ final class RuntimeState {
     var passThroughPhysicalCombo = false
     var syntheticDownPosted = false
     var originalInputID: String?
+    var wasAlreadyVoice = false
     var eventTapReady = false
     var accessibilityOK = false
     var inputMonitoringOK = false
@@ -360,8 +453,14 @@ func selectAndSettleInput(_ id: String, settleMs: UInt32) -> Bool {
     return true
 }
 
+// A private-state event source so synthetic modifier presses carry their own
+// modifier state instead of merging with whatever hardware keys are physically
+// held. This lets the replayed shortcut register as a clean edge even while the
+// user is holding the (decoupled) trigger key.
+let syntheticEventSource = CGEventSource(stateID: .privateState)
+
 func postModifier(_ keyCode: CGKeyCode, down: Bool, flags: CGEventFlags) {
-    guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down) else { return }
+    guard let event = CGEvent(keyboardEventSource: syntheticEventSource, virtualKey: keyCode, keyDown: down) else { return }
     event.flags = flags
     event.setIntegerValueField(.eventSourceUserData, value: marker)
     event.post(tap: .cghidEventTap)
@@ -441,6 +540,82 @@ func modifierKeySpec(_ raw: String) -> ModifierKeySpec? {
     }
 }
 
+// The physical trigger key the user holds. It is intentionally DECOUPLED from the
+// replayed voice shortcut (voiceShortcutModifiers) so the synthetic shortcut is a
+// clean edge. Detection is by key code, not flags, so e.g. left ⌘ shortcuts like
+// ⌘C never look like a right-⌘ trigger.
+struct TriggerKeySpec {
+    let name: String
+    let keyCode: CGKeyCode
+    let flag: CGEventFlags
+    let display: String
+}
+
+func triggerKeySpec(_ raw: String) -> TriggerKeySpec {
+    let rightCommand = TriggerKeySpec(name: "rightCommand", keyCode: 54, flag: .maskCommand, display: "Right ⌘")
+    switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "rightcommand", "right_command", "rcmd", "right-cmd":
+        return rightCommand
+    case "leftcommand", "left_command", "lcmd", "command", "cmd":
+        return TriggerKeySpec(name: "leftCommand", keyCode: 55, flag: .maskCommand, display: "Left ⌘")
+    case "rightoption", "right_option", "roption", "ralt":
+        return TriggerKeySpec(name: "rightOption", keyCode: 61, flag: .maskAlternate, display: "Right ⌥")
+    case "leftoption", "left_option", "option", "alt":
+        return TriggerKeySpec(name: "leftOption", keyCode: 58, flag: .maskAlternate, display: "Left ⌥")
+    case "rightcontrol", "right_control", "rctrl":
+        return TriggerKeySpec(name: "rightControl", keyCode: 62, flag: .maskControl, display: "Right ⌃")
+    case "leftcontrol", "left_control", "control", "ctrl":
+        return TriggerKeySpec(name: "leftControl", keyCode: 59, flag: .maskControl, display: "Left ⌃")
+    case "rightshift", "right_shift", "rshift":
+        return TriggerKeySpec(name: "rightShift", keyCode: 60, flag: .maskShift, display: "Right ⇧")
+    case "leftshift", "left_shift", "shift":
+        return TriggerKeySpec(name: "leftShift", keyCode: 56, flag: .maskShift, display: "Left ⇧")
+    case "fn", "function", "globe":
+        return TriggerKeySpec(name: "fn", keyCode: 63, flag: .maskSecondaryFn, display: "fn")
+    default:
+        return rightCommand
+    }
+}
+
+final class TriggerKeyCache {
+    private let lock = NSLock()
+    private var spec: TriggerKeySpec
+
+    init(spec: TriggerKeySpec) {
+        self.spec = spec
+    }
+
+    func read() -> TriggerKeySpec {
+        lock.lock()
+        defer { lock.unlock() }
+        return spec
+    }
+
+    func update(_ newSpec: TriggerKeySpec) {
+        lock.lock()
+        spec = newSpec
+        lock.unlock()
+    }
+}
+
+let triggerKeyCache = TriggerKeyCache(spec: triggerKeySpec(config.triggerKey))
+
+func cachedTriggerKeySpec() -> TriggerKeySpec {
+    return triggerKeyCache.read()
+}
+
+func refreshTriggerKeyCache() {
+    triggerKeyCache.update(triggerKeySpec(config.triggerKey))
+}
+
+func isTriggerKeycode(_ keycode: Int64) -> Bool {
+    return Int64(cachedTriggerKeySpec().keyCode) == keycode
+}
+
+func triggerKeyDescription() -> String {
+    return cachedTriggerKeySpec().display
+}
+
 func postVoiceShortcutDown() {
     var flags: CGEventFlags = []
     let definition = cachedVoiceShortcutDefinition()
@@ -465,27 +640,8 @@ func postVoiceShortcutUp() {
     log("posted voice shortcut up modifiers=\(definition.description)")
 }
 
-func relevantFlags(_ flags: CGEventFlags) -> CGEventFlags {
-    return flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift, .maskSecondaryFn])
-}
-
-func isVoiceShortcutOnly(_ flags: CGEventFlags) -> Bool {
-    return relevantFlags(flags) == cachedVoiceShortcutDefinition().flags
-}
-
 func voiceShortcutDescription() -> String {
     return cachedVoiceShortcutDefinition().description
-}
-
-func modifierFlagDescription(_ flags: CGEventFlags) -> String {
-    var names: [String] = []
-    if flags.contains(.maskCommand) { names.append("cmd") }
-    if flags.contains(.maskAlternate) { names.append("option") }
-    if flags.contains(.maskControl) { names.append("control") }
-    if flags.contains(.maskShift) { names.append("shift") }
-    if flags.contains(.maskSecondaryFn) { names.append("fn") }
-    if names.isEmpty { names.append("none") }
-    return "\(names.joined(separator: "+")) raw=\(flags.rawValue)"
 }
 
 func isVoiceInput(_ id: String) -> Bool {
@@ -507,6 +663,11 @@ func writeStatusFile(_ snapshot: RuntimeSnapshot) {
         "restoreInputDelayMs": config.restoreInputDelayMs,
         "voiceShortcutModifiers": config.voiceShortcutModifiers,
         "voiceUIWindowOwnerNames": config.voiceUIWindowOwnerNames,
+        "triggerKey": cachedTriggerKeySpec().name,
+        "voiceVerifyTimeoutMs": config.voiceVerifyTimeoutMs,
+        "voiceRetryGapMs": config.voiceRetryGapMs,
+        "voiceMaxRetries": config.voiceMaxRetries,
+        "voiceReadinessSignal": config.voiceReadinessSignal,
         "mode": snapshot.mode.rawValue,
         "eventTapReady": snapshot.eventTapReady,
         "accessibilityOK": snapshot.accessibilityOK,

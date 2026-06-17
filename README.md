@@ -3,31 +3,37 @@
 A tiny macOS menu bar agent for this workflow:
 
 - Keep WeType as the everyday input method.
-- Hold the configured voice shortcut, default `Command + Option`, to temporarily switch to Doubao IME.
-- Replay a clean hold of that same configured shortcut so Doubao's voice input starts.
-- Release the shortcut to end voice input and switch back to WeType.
-- If Doubao IME is already active, leave the shortcut alone.
+- Hold a dedicated trigger key, default **Right Command**, to temporarily switch to Doubao IME.
+- Replay Doubao's own voice shortcut (default `Command + Option`) so its hold-to-talk voice input starts, and confirm it actually started before settling.
+- Release the trigger key to end voice input and switch back to the input method you were using.
+- If Doubao IME is already active, skip the switch but still replay the voice shortcut, and stay on Doubao afterward.
+
+The trigger key you hold is intentionally **decoupled** from the shortcut replayed to Doubao. That is the key to reliability: because your fingers are not already holding `Command + Option`, the replayed shortcut registers as a clean, fresh key edge instead of colliding with keys you are physically holding.
 
 It is not an IME plugin and does not modify Doubao or WeType. It is a small Swift app that combines the macOS Text Input Source API with a Quartz event tap.
 
 ## Why This Exists
 
-Doubao voice input is a hold-to-talk shortcut. If you press its configured shortcut while another IME is active, then switch to Doubao afterward, Doubao may miss the original key-down event.
+Doubao voice input is a hold-to-talk shortcut that only works while Doubao is the active IME. Two things make a naive "switch then press" unreliable:
 
-This agent handles that ordering:
+1. After macOS reports the switch, Doubao's voice hotkey listener is not necessarily live yet, so a shortcut posted on a fixed delay can be missed.
+2. If the key you hold is the same as the shortcut being replayed, the synthetic press is not a fresh edge (the modifier is already physically down), so Doubao may not see a new press.
+
+This agent handles both:
 
 ```text
-physical configured shortcut down
-  -> suppress original event
-  -> switch to Doubao IME
+trigger key down (default Right ⌘)
+  -> suppress the trigger key (decoupled from the voice shortcut)
+  -> switch to Doubao IME (skip if already active)
   -> wait until macOS confirms the switch
-  -> wait a short settle delay
-  -> post the configured Doubao voice shortcut down
-  -> wait for physical release
-  -> post the configured Doubao voice shortcut up
-  -> wait before restoring the previous IME
-  -> switch back to WeType
+  -> post the Doubao voice shortcut down (default ⌘⌥, from a private event source)
+  -> verify voice actually started (microphone in use, or a new Doubao window)
+  -> if not started in time: release and re-press once (a clean re-trigger), bounded
+  -> wait for trigger key release
+  -> post the Doubao voice shortcut up
+  -> wait, then restore the input method you started from
 ```
+
 
 ## Menu Bar Status
 
@@ -42,6 +48,7 @@ The menu shows current permissions, current input method, event tap state, voice
 
 Use `Restart agent` to let launchd restart the agent. Use `Quit agent` to unload the LaunchAgent and stop the menu bar process.
 Use `Run voice probe diagnostics` to observe visible window changes for 3 seconds without sending any shortcut. The log marks whether each new window matches the configured Doubao owner names.
+Use `Run activation calibration` to measure, on this machine, how long the IME switch takes to confirm and how long after the replayed shortcut the microphone actually starts, and whether releasing stops the mic (hold-to-talk) or not (toggle). It briefly starts and stops Doubao voice; results go to the log and help you tune `voiceVerifyTimeoutMs`.
 
 ## Requirements
 
@@ -168,9 +175,19 @@ The LaunchAgent template uses environment variables:
 RESTORE_IME_ID=com.tencent.inputmethod.wetype.pinyin
 VOICE_IME_ID=com.bytedance.inputmethod.doubaoime.pinyin
 VOICE_IME_ALIASES=com.bytedance.inputmethod.doubaoime
+TRIGGER_KEY=rightCommand
 ```
 
 Edit the installed plist or template if you want to use a different restore IME or voice IME.
+
+## Trigger Key And Voice Shortcut
+
+These are two separate things and should stay separate:
+
+- `triggerKey` — the single key you physically hold. Default `rightCommand`. Supported: `rightCommand`, `leftCommand`, `rightOption`, `leftOption`, `rightControl`, `leftControl`, `rightShift`, `leftShift`, `fn`. It is detected by key code, so e.g. holding right ⌘ never collides with ordinary ⌘C/⌘V.
+- `voiceShortcutModifiers` — the hold-to-talk shortcut configured **inside Doubao**, which the agent replays. Default `cmd,option`. Supported names: `cmd`, `option`, `control`, `shift`.
+
+Keep them disjoint for best reliability. `fn` is the cleanest trigger because it shares no modifier flag with `cmd`/`option`; `rightCommand` is the default for ergonomics. If you change Doubao's voice shortcut, set `voiceShortcutModifiers` to match it.
 
 ## Tune Voice Startup Timing
 
@@ -180,7 +197,7 @@ The agent keeps a persistent config file at:
 ~/Library/Application Support/DoubaoVoiceWeTypeAgent/config.json
 ```
 
-The default voice trigger delay is `300` ms:
+Defaults:
 
 ```json
 {
@@ -194,21 +211,36 @@ The default voice trigger delay is `300` ms:
     "DoubaoIme",
     "Doubao",
     "豆包"
-  ]
+  ],
+  "triggerKey": "rightCommand",
+  "voiceReadinessSignal": "microphone",
+  "voiceVerifyTimeoutMs": 700,
+  "voiceRetryGapMs": 90,
+  "voiceMaxRetries": 1
 }
 ```
 
-`voiceSettleDelayMs` is the wait after macOS reports Doubao as the active input source and before the agent posts the configured Doubao voice shortcut down. `voiceShortcutModifiers` is both the physical shortcut the agent listens for and the shortcut configured inside Doubao for hold-to-talk voice input; the default is your current `Command + Option`. Supported modifier names are `cmd`, `option`, `control`, and `shift`. `restoreInputDelayMs` is the delay after release before switching back to WeType.
+- `voiceSettleDelayMs` — wait after macOS confirms the Doubao switch and before the first synthetic shortcut down.
+- `voiceReadinessSignal` — how the agent confirms voice actually started: `microphone` (default; the default input device starts running — screen-independent, no extra permission), `window` (a new Doubao-owned window appears, ignoring its size/position), or `none` (post and assume). With `microphone`, if the mic is already in use at trigger time (e.g. a call) the agent automatically falls back to the window signal.
+- `voiceVerifyTimeoutMs` — how long to wait for the readiness signal before re-triggering. Use `Run activation calibration` to find a good value for your machine.
+- `voiceMaxRetries` — extra clean re-triggers (release then press) if voice did not start; `0` disables re-triggering.
+- `voiceRetryGapMs` — pause between a re-trigger's release and the next press.
+- `restoreInputDelayMs` — delay after you release the trigger key before switching back.
 
-The main activation path no longer probes UI windows or retries. `Run voice probe diagnostics` is only for troubleshooting; it logs new visible windows with `matchConfiguredOwner=true/false`, `likelyVoicePanel=true/false`, owner, name, and bounds.
+`Run voice probe diagnostics` and the geometry-based window heuristic are troubleshooting-only; the activation path uses the microphone/owner-window signals above, which do not depend on screen resolution, scaling, the Dock, or which display is active.
 
-You can also override it from LaunchAgent with:
+You can also override these from the LaunchAgent with:
 
 ```text
 VOICE_SETTLE_DELAY_MS=300
 RESTORE_INPUT_DELAY_MS=2000
 VOICE_SHORTCUT_MODIFIERS=cmd,option
 VOICE_UI_WINDOW_OWNER_NAMES=DoubaoIme,Doubao,豆包
+TRIGGER_KEY=rightCommand
+VOICE_READINESS_SIGNAL=microphone
+VOICE_VERIFY_TIMEOUT_MS=700
+VOICE_RETRY_GAP_MS=90
+VOICE_MAX_RETRIES=1
 ```
 
 ## Diagnostics
@@ -250,5 +282,6 @@ Keeping the app in place is better for update stability.
 ## Caveats
 
 - Rebuilding or replacing the binary can make macOS ask for permissions again.
-- Third-party IMEs may report as selected before their own shortcut monitors are ready. The agent uses a confirmation loop plus a configurable trigger delay, but timing can still be system-dependent.
-- The agent listens only for `flagsChanged` events and a modifier-only shortcut configured by `voiceShortcutModifiers`.
+- Third-party IMEs may report as selected before their own shortcut monitors are ready. The agent confirms voice actually started (microphone/owner window) and re-triggers once if needed, but exact timing is still system-dependent; tune `voiceVerifyTimeoutMs` with `Run activation calibration`.
+- The trigger key is detected by key code on `flagsChanged`, so it must be a modifier-type key (`triggerKey` whitelist). It is decoupled from `voiceShortcutModifiers`, the shortcut replayed to Doubao.
+- The microphone readiness signal reads device state only; it does not request the Microphone permission. If you are already recording when you trigger, the agent falls back to the window signal.

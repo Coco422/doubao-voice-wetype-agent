@@ -32,15 +32,13 @@ launchctl kickstart -k gui/$(id -u)/com.github.Coco422.doubao-voice-wetype-agent
 
 ## Voice input does not start, but the IME switches
 
-This is usually timing-related or shortcut-mapping-related. The agent waits for the selected input source, adds a small trigger delay, then posts the configured Doubao voice shortcut down. It keeps that synthetic shortcut held until the physical shortcut is released, then posts the same shortcut up and waits before restoring WeType.
-
-Open the menu bar item and check `Voice timing`. You can edit the persistent config:
+The agent switches to Doubao, posts the configured Doubao voice shortcut down (from a private event source), then verifies voice actually started before settling. If it cannot confirm, it does one clean re-trigger (release then press). Check the menu's trigger/verify line, and edit the persistent config:
 
 ```bash
 open "$HOME/Library/Application Support/DoubaoVoiceWeTypeAgent/config.json"
 ```
 
-The default timing config is:
+Defaults:
 
 ```json
 {
@@ -54,11 +52,22 @@ The default timing config is:
     "DoubaoIme",
     "Doubao",
     "豆包"
-  ]
+  ],
+  "triggerKey": "rightCommand",
+  "voiceReadinessSignal": "microphone",
+  "voiceVerifyTimeoutMs": 700,
+  "voiceRetryGapMs": 90,
+  "voiceMaxRetries": 1
 }
 ```
 
-Make sure `voiceShortcutModifiers` matches the voice shortcut configured inside Doubao. The agent uses it both for the physical shortcut it listens for and the synthetic shortcut it replays. The default is `cmd,option`, and supported modifier names are `cmd`, `option`, `control`, and `shift`. If Doubao switches in but voice input does not start, try increasing `voiceSettleDelayMs`, for example `500` or `700`. If restore happens too soon after release, increase `restoreInputDelayMs`.
+Steps:
+
+1. Run `Run activation calibration` from the menu. It logs the IME switch time, the microphone start latency after the shortcut, and whether release stops the mic (hold-to-talk) or not (toggle). Set `voiceVerifyTimeoutMs` to at least the measured mic latency plus headroom.
+2. Make sure `voiceShortcutModifiers` matches the voice shortcut configured **inside Doubao** (`cmd,option` by default; names: `cmd`, `option`, `control`, `shift`).
+3. Make sure `triggerKey` is the key you actually hold (default `rightCommand`). It must be a modifier-type key from the whitelist. Keep it disjoint from `voiceShortcutModifiers`; `fn` is the cleanest if `rightCommand` misbehaves.
+4. If voice still misses, raise `voiceMaxRetries` to `2`, or try `voiceReadinessSignal: "window"` if microphone detection is unreliable on your setup.
+5. If restore happens too soon after release, raise `restoreInputDelayMs`.
 
 Check the log:
 
@@ -69,14 +78,15 @@ tail -100 "$HOME/Library/Logs/doubao-voice-wetype-agent.log"
 Look for:
 
 ```text
-physical voice shortcut down
-voice shortcut down posted
-physical voice shortcut released
+trigger down (Right ⌘)
+voice shortcut down posted attempt=1
+voice started: mic detected on attempt 1
+trigger released (Right ⌘)
 voice shortcut up posted
-restored input
+restored input to <your IME>
 ```
 
-`Run voice probe diagnostics` is still available from the menu, but it is diagnostic only. The main activation path no longer depends on window detection.
+If you see `verify failed after N attempt(s)`, voice was posted but never confirmed — increase `voiceVerifyTimeoutMs` (per calibration) or switch the readiness signal. `Run voice probe diagnostics` and the geometry heuristic are diagnostics-only; activation does not depend on window position.
 
 ## The current input source ID is unknown
 

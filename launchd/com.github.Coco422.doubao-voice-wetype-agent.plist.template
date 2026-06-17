@@ -20,6 +20,8 @@
     <string>com.bytedance.inputmethod.doubaoime.pinyin</string>
     <key>VOICE_IME_ALIASES</key>
     <string>com.bytedance.inputmethod.doubaoime</string>
+    <key>TRIGGER_KEY</key>
+    <string>rightCommand</string>
   </dict>
 
   <key>RunAtLoad</key>

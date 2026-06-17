@@ -68,6 +68,7 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Restore input method", action: #selector(restoreInputNow), keyEquivalent: "w"))
         menu.addItem(NSMenuItem(title: "Run voice probe diagnostics", action: #selector(runVoiceProbeDiagnostics), keyEquivalent: "d"))
+        menu.addItem(NSMenuItem(title: "Run activation calibration", action: #selector(runActivationCalibration), keyEquivalent: "k"))
         menu.addItem(NSMenuItem(title: "Open config", action: #selector(openConfig), keyEquivalent: "c"))
         menu.addItem(NSMenuItem(title: "Open log", action: #selector(openLog), keyEquivalent: "l"))
         menu.addItem(NSMenuItem(title: "Restart agent", action: #selector(restartAgent), keyEquivalent: "q"))
@@ -100,6 +101,7 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let id = currentInputID() ?? "unknown"
         mutateRuntime { $0.currentInputID = id }
         refreshVoiceShortcutCache()
+        refreshTriggerKeyCache()
     }
 
     func refreshPermissions(requestPrompt: Bool) {
@@ -217,7 +219,7 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenuItem.title = "Status: \(snapshot.mode.rawValue)"
         permissionsMenuItem.title = "Permissions: AX \(snapshot.accessibilityOK ? "OK" : "missing") / Input \(snapshot.inputMonitoringOK ? "OK" : "missing")"
         inputMenuItem.title = "Current input: \(displayInputName(snapshot.currentInputID))"
-        timingMenuItem.title = "Voice: \(voiceShortcutDescription()) / trigger \(config.voiceSettleDelayMs) ms / restore \(config.restoreInputDelayMs) ms"
+        timingMenuItem.title = "Trigger \(triggerKeyDescription()) → \(voiceShortcutDescription()); verify \(config.voiceReadinessSignal)/\(config.voiceVerifyTimeoutMs)ms; restore \(config.restoreInputDelayMs)ms"
         activationMenuItem.title = "Activation: \(snapshot.lastActivationResult)"
         probeWindowMenuItem.title = "Probe window: \(snapshot.lastProbeWindow ?? "none")"
         tapMenuItem.title = "Tap: \(snapshot.eventTapReady ? "enabled" : "disabled") / restarts \(snapshot.tapRestartCount)"
@@ -317,6 +319,73 @@ final class AgentApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             self?.updateStatusUIOnMain()
         }
+    }
+
+    @objc private func runActivationCalibration() {
+        mutateRuntime {
+            $0.lastEvent = "activation calibration running"
+            $0.lastActivationResult = "calibration running"
+        }
+        updateStatusUI()
+        log("calibration: requested; this briefly starts/stops Doubao voice to measure timing")
+
+        worker.async { [weak self] in
+            self?.performActivationCalibration()
+        }
+    }
+
+    // One-shot measurement to set the closed-loop timing on this exact machine:
+    // how long the IME switch takes to confirm, how long after the synthetic
+    // shortcut the microphone actually starts, and whether release stops the mic
+    // (hold-to-talk) or not (toggle). Results go to the log only.
+    private func performActivationCalibration() {
+        let original = currentInputID() ?? "unknown"
+        log("calibration: original input=\(original)")
+
+        let switchStart = Date()
+        let selected = selectInput(config.voiceInputID)
+        let confirmed = selected ? waitForInput(config.voiceInputID, timeoutMs: 2_000) : false
+        let switchMs = Int(Date().timeIntervalSince(switchStart) * 1000)
+        log("calibration: selectInput=\(selected) confirmed=\(confirmed) switchMs=\(switchMs)")
+
+        guard confirmed else {
+            log("calibration: could not switch to voice input; aborting")
+            _ = selectAndSettleInput(original, settleMs: 60)
+            mutateRuntime {
+                $0.lastEvent = "calibration aborted: switch failed"
+                $0.lastActivationResult = "calibration aborted"
+            }
+            updateStatusUIOnMain()
+            return
+        }
+
+        let micBefore = MicMonitor.isInputRunningSomewhere()
+        log("calibration: mic running before down=\(micBefore)")
+
+        let downAt = Date()
+        postVoiceShortcutDown()
+        let micStarted = MicMonitor.waitForInputRunning(timeoutMs: 2_500)
+        let micMs = Int(Date().timeIntervalSince(downAt) * 1000)
+        log("calibration: after down micStarted=\(micStarted) micLatencyMs=\(micStarted ? micMs : -1)")
+
+        usleep(1_200_000)
+        let micWhileHeld = MicMonitor.isInputRunningSomewhere()
+        postVoiceShortcutUp()
+        usleep(400_000)
+        let micAfterUp = MicMonitor.isInputRunningSomewhere()
+        let semantics = micAfterUp ? "mic still on after release (TOGGLE-like or mic shared by another app)" : "mic off after release (consistent with HOLD-to-talk)"
+        log("calibration: micWhileHeld=\(micWhileHeld) micAfterUp=\(micAfterUp) -> \(semantics)")
+
+        _ = selectAndSettleInput(original, settleMs: 60)
+        let suggested = micStarted ? max(300, micMs + 200) : 700
+        log("calibration: restored to \(displayInputName(original)); suggested voiceVerifyTimeoutMs >= \(suggested)")
+
+        mutateRuntime {
+            $0.lastEvent = "calibration done: switchMs=\(switchMs), micMs=\(micStarted ? micMs : -1)"
+            $0.lastActivationResult = "calibration done (see log)"
+            $0.lastError = nil
+        }
+        updateStatusUIOnMain()
     }
 
     @objc private func restartAgent() {
